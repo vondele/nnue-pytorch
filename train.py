@@ -45,13 +45,14 @@ def main():
   parser = pl.Trainer.add_argparse_args(parser)
   parser.add_argument("--py-data", action="store_true", help="Use python data loader (default=False)")
   parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
+  parser.add_argument("--scale", default=600.0, type=float, dest='scale_', help="scale=600.0 default behavior ")
   parser.add_argument("--num-workers", default=1, type=int, dest='num_workers', help="Number of worker threads to use for data loading. Currently only works well for binpack.")
   parser.add_argument("--batch-size", default=-1, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default on GPU = 8192 on CPU = 128.")
   parser.add_argument("--threads", default=-1, type=int, dest='threads', help="Number of torch threads to use. Default automatic (cores) .")
   parser.add_argument("--seed", default=42, type=int, dest='seed', help="torch seed to use.")
   args = parser.parse_args()
 
-  nnue = M.NNUE(halfkp, lambda_=args.lambda_)
+  nnue = M.NNUE(halfkp, lambda_=args.lambda_, scale_=args.scale_)
 
   print("Training with {} validating with {}".format(args.train, args.val))
 

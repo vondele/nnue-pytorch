@@ -20,7 +20,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set=halfkp, lambda_=1.0):
+  def __init__(self, feature_set=halfkp, lambda_=1.0, scale_=600.0):
     super(NNUE, self).__init__()
     num_inputs = feature_set.INPUTS
     self.input = nn.Linear(num_inputs, L1)
@@ -35,6 +35,7 @@ class NNUE(pl.LightningModule):
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
+    self.scale_ = scale_
 
   def forward(self, us, them, w_in, b_in):
     w = self.input(w_in)
@@ -53,7 +54,7 @@ class NNUE(pl.LightningModule):
     q = self(us, them, white, black)
     t = outcome
     # Divide score by 600.0 to match the expected NNUE scaling factor
-    p = (score / 600.0).sigmoid()
+    p = (score / self.scale_).sigmoid()
     epsilon = 1e-12
     teacher_entropy = -(p * (p + epsilon).log() + (1.0 - p) * (1.0 - p + epsilon).log())
     outcome_entropy = -(t * (t + epsilon).log() + (1.0 - t) * (1.0 - t + epsilon).log())
