@@ -35,8 +35,9 @@ class NNUEWriter():
   """
   All values are stored in little endian.
   """
-  def __init__(self, model):
+  def __init__(self, model, scale_):
     self.buf = bytearray()
+    self.scale_ = scale_
 
     self.write_header()
     self.int32(0x5d69d7b8) # Feature transformer hash
@@ -77,7 +78,7 @@ class NNUEWriter():
     if not is_output:
       kBiasScale = (1 << kWeightScaleBits) * kActivationScale # = 8128
     else:
-      kBiasScale = 9600.0 # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
+      kBiasScale = 16 * self.scale_ # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
     kWeightScale = kBiasScale / kActivationScale # = 64.0 for normal layers
     kMaxWeight = 127.0 / kWeightScale # roughly 2.0
 
@@ -97,8 +98,9 @@ class NNUEWriter():
     self.buf.extend(struct.pack("<i", v))
 
 class NNUEReader():
-  def __init__(self, f):
+  def __init__(self, f, scale_):
     self.f = f
+    self.scale_ = scale_
     self.model = M.NNUE()
 
     self.read_header()
@@ -134,7 +136,7 @@ class NNUEReader():
     if not is_output:
       kBiasScale = (1 << kWeightScaleBits) * kActivationScale # = 8128
     else:
-      kBiasScale = 9600.0 # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
+      kBiasScale = 16.0 * self.scale_ # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
     kWeightScale = kBiasScale / kActivationScale # = 64.0 for normal layers
 
     layer.bias.data = self.tensor(numpy.int32, layer.bias.shape).divide(kBiasScale)
@@ -167,11 +169,12 @@ def test(model):
 
 def main():
   parser = argparse.ArgumentParser(description="Converts files between ckpt and nnue format.")
+  parser.add_argument("--scale", default=600.0, type=float, dest='scale_', help="scale=600.0 default behavior ")
   parser.add_argument("source", help="Source file (can be .ckpt, .pt or .nnue)")
   parser.add_argument("target", help="Target file (can be .pt or .nnue)")
   args = parser.parse_args()
 
-  print('Converting %s to %s' % (args.source, args.target))
+  print('Converting %s to %s using scale %f' % (args.source, args.target, args.scale_))
 
   if args.source.endswith(".pt") or args.source.endswith(".ckpt"):
     if not args.target.endswith(".nnue"):
@@ -182,14 +185,14 @@ def main():
       nnue = M.NNUE.load_from_checkpoint(args.source)
     nnue.eval()
     #test(nnue)
-    writer = NNUEWriter(nnue)
+    writer = NNUEWriter(nnue, args.scale_)
     with open(args.target, 'wb') as f:
       f.write(writer.buf)
   elif args.source.endswith(".nnue"):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
     with open(args.source, 'rb') as f:
-      reader = NNUEReader(f)
+      reader = NNUEReader(f, args.scale_)
     torch.save(reader.model, args.target)
   else:
     raise Exception('Invalid filetypes: ' + str(args))
