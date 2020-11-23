@@ -6835,6 +6835,11 @@ namespace binpack
         {
             return pos.isCheck();
         }
+
+        [[nodiscard]] bool isHighScore() const
+        {
+            return std::abs(score) > 208 * 4;
+        }
     };
 
     [[nodiscard]] inline TrainingDataEntry packedSfenValueToTrainingDataEntry(const nodchip::PackedSfenValue& psv)
@@ -7536,7 +7541,7 @@ namespace binpack
                                 isEnd = fetchNextChunkIfNeeded(m_offset, m_chunk);
                             }
 
-                            if (!e.isCapturingMove() && !e.isInCheck())
+                            if (!e.isCapturingMove() && !e.isInCheck() && !e.isHighScore())
                                 m_localBuffer.emplace_back(e);
                         }
                         else
@@ -7559,7 +7564,7 @@ namespace binpack
                                 isEnd = fetchNextChunkIfNeeded(m_offset, m_chunk);
                             }
 
-                            if (!e.isCapturingMove() && !e.isInCheck())
+                            if (!e.isCapturingMove() && !e.isInCheck() && !e.isHighScore())
                                 m_localBuffer.emplace_back(e);
                         }
 
