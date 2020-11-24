@@ -5,6 +5,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+import math
 
 # 3 layer fully connected network
 L1 = 256
@@ -28,12 +29,41 @@ class NNUE(pl.LightningModule):
     # Zero out the weights/biases for the factorized features
     # Weights stored as [256][41024]
     weights = self.input.weight.narrow(1, 0, feature_set.INPUTS - feature_set.FACTOR_INPUTS)
+    kMaxActiveDimensions = 32
+    kSigma = 0.1 / math.sqrt(kMaxActiveDimensions)
+    weights = weights.normal_(0.0, kSigma)
     weights = torch.cat((weights, torch.zeros(L1, feature_set.FACTOR_INPUTS)), dim=1)
+    biases = self.input.bias
+    biases = biases.clone().fill_(0.5)
     self.input.weight = nn.Parameter(weights)
+    self.input.bias = nn.Parameter(biases)
 
     self.l1 = nn.Linear(2 * L1, L2)
+    weights = self.l1.weight
+    biases = self.l1.bias
+    kSigma = 1.0 / math.sqrt(2 * L1)
+    weights = weights.clone().normal_(0.0, kSigma)
+    biases = 0.5 - 0.5 * weights.sum(dim=1)
+    self.l1.weight = nn.Parameter(weights)
+    self.l1.bias = nn.Parameter(biases)
+
     self.l2 = nn.Linear(L2, L3)
+    weights = self.l2.weight
+    biases = self.l2.bias
+    kSigma = 1.0 / math.sqrt(L2)
+    weights = weights.clone().normal_(0.0, kSigma)
+    biases = 0.5 - 0.5 * weights.sum(dim=1)
+    self.l2.weight = nn.Parameter(weights)
+    self.l2.bias = nn.Parameter(biases)
+
     self.output = nn.Linear(L3, 1)
+    weights = self.output.weight
+    biases = self.output.bias
+    biases = biases.clone().fill_(0.0)
+    weights = weights.clone().fill_(0.0)
+    self.output.weight = nn.Parameter(weights)
+    self.output.bias = nn.Parameter(biases)
+
     self.lambda_ = lambda_
 
   def forward(self, us, them, w_in, b_in):
