@@ -365,7 +365,7 @@ extern "C" {
         if (filtered)
         {
             skipPredicate = [](const TrainingDataEntry& e){
-                return e.isCapturingMove() || e.isInCheck();
+                return e.isCapturingMove() || e.isInCheck() || e.isHighScore();
             };
         }
 

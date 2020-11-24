@@ -6835,6 +6835,17 @@ namespace binpack
         {
             return pos.isCheck();
         }
+
+        [[nodiscard]] bool isHighScore() const
+        {
+            return std::abs(score) > 208 * 4;
+        }
+
+        [[nodiscard]] bool isDrawScore() const
+        {
+            return std::abs(score) < 10;
+        }
+
     };
 
     [[nodiscard]] inline TrainingDataEntry packedSfenValueToTrainingDataEntry(const nodchip::PackedSfenValue& psv)
