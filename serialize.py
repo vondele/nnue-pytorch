@@ -76,7 +76,7 @@ class NNUEWriter():
     self.buf.extend(bias.flatten().numpy().tobytes())
 
     weight = layer.weight.data
-    weight = coalesce_weights(weight)
+    #weight = coalesce_weights(weight)
     weight = weight.mul(127).round().to(torch.int16)
     ascii_hist('ft weight:', weight.numpy())
     # weights stored as [41024][256], so we need to transpose the pytorch [256][41024]
