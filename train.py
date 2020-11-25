@@ -12,8 +12,8 @@ def data_loader_cc(train_filename, val_filename, num_workers, batch_size, filter
   # Epoch and validation sizes are arbitrary
   epoch_size = 100000000
   val_size = 1000000
-  train_infinite = nnue_dataset.SparseBatchDataset(halfkp.FACTOR_NAME, train_filename, batch_size, num_workers=num_workers, filtered=filtered)
-  val_infinite = nnue_dataset.SparseBatchDataset(halfkp.FACTOR_NAME, val_filename, batch_size, filtered=filtered)
+  train_infinite = nnue_dataset.SparseBatchDataset(halfkp.NAME, train_filename, batch_size, num_workers=num_workers, filtered=filtered)
+  val_infinite = nnue_dataset.SparseBatchDataset(halfkp.NAME, val_filename, batch_size, filtered=filtered)
   # num_workers has to be 0 for sparse, and 1 for dense
   # it currently cannot work in parallel mode but it shouldn't need to
   train = DataLoader(nnue_dataset.FixedNumBatchesDataset(train_infinite, (epoch_size + batch_size - 1) // batch_size), batch_size=None, batch_sampler=None)
