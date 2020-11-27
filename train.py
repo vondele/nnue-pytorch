@@ -4,6 +4,7 @@ import nnue_dataset
 import nnue_bin_dataset
 import pytorch_lightning as pl
 import halfkp
+import torch
 from torch import set_num_threads as t_set_num_threads
 from pytorch_lightning import loggers as pl_loggers
 from torch.utils.data import DataLoader, Dataset
@@ -70,6 +71,7 @@ def main():
   tb_logger = pl_loggers.TensorBoardLogger(logdir)
   checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True)
   trainer = pl.Trainer.from_argparse_args(args, callbacks=[checkpoint_callback], logger=tb_logger)
+  nnue = torch.load("nn-c3ca321c51c9.pt")
   trainer.fit(nnue, train, val)
 
 if __name__ == '__main__':

@@ -50,25 +50,31 @@ class NNUE(pl.LightningModule):
   def step_(self, batch, batch_idx, loss_type):
     us, them, white, black, outcome, score = batch
 
-    q = self(us, them, white, black)
-    t = outcome
-    # Divide score by 600.0 to match the expected NNUE scaling factor
-    p = (score / 600.0).sigmoid()
-    epsilon = 1e-12
-    teacher_entropy = -(p * (p + epsilon).log() + (1.0 - p) * (1.0 - p + epsilon).log())
-    outcome_entropy = -(t * (t + epsilon).log() + (1.0 - t) * (1.0 - t + epsilon).log())
-    teacher_loss = -(p * F.logsigmoid(q) + (1.0 - p) * F.logsigmoid(-q))
-    outcome_loss = -(t * F.logsigmoid(q) + (1.0 - t) * F.logsigmoid(-q))
-    result  = self.lambda_ * teacher_loss    + (1.0 - self.lambda_) * outcome_loss
-    entropy = self.lambda_ * teacher_entropy + (1.0 - self.lambda_) * outcome_entropy
-    loss = result.mean() - entropy.mean()
+    if False:
+       q = self(us, them, white, black)
+       t = outcome
+       # Divide score by 600.0 to match the expected NNUE scaling factor
+       p = (score / 600.0).sigmoid()
+       epsilon = 1e-12
+       teacher_entropy = -(p * (p + epsilon).log() + (1.0 - p) * (1.0 - p + epsilon).log())
+       outcome_entropy = -(t * (t + epsilon).log() + (1.0 - t) * (1.0 - t + epsilon).log())
+       teacher_loss = -(p * F.logsigmoid(q) + (1.0 - p) * F.logsigmoid(-q))
+       outcome_loss = -(t * F.logsigmoid(q) + (1.0 - t) * F.logsigmoid(-q))
+       result  = self.lambda_ * teacher_loss    + (1.0 - self.lambda_) * outcome_loss
+       entropy = self.lambda_ * teacher_entropy + (1.0 - self.lambda_) * outcome_entropy
+       loss = result.mean() - entropy.mean()
+    else:
+       # MSE Loss function for debugging
+       # Scale score by 600.0 to match the expected NNUE scaling factor
+       output = self(us, them, white, black) * 600.0
+       print("output: ", output)
+       print("score: ", score)
+       quit()
+       loss = F.mse_loss(output, score)
+
     self.log(loss_type, loss)
     return loss
 
-    # MSE Loss function for debugging
-    # Scale score by 600.0 to match the expected NNUE scaling factor
-    # output = self(us, them, white, black) * 600.0
-    # loss = F.mse_loss(output, score)
 
   def training_step(self, batch, batch_idx):
     return self.step_(batch, batch_idx, 'train_loss')
