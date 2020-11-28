@@ -67,10 +67,12 @@ class NNUE(pl.LightningModule):
        # MSE Loss function for debugging
        # Scale score by 600.0 to match the expected NNUE scaling factor
        output = self(us, them, white, black) * 600.0
-       print("output: ", output)
-       print("score: ", score)
-       quit()
-       loss = F.mse_loss(output, score)
+       # with open('out.txt', 'w') as f:
+       #   for d in zip(output, score):
+       #       print(float(d[0]),float(d[1]),file=f)
+       # quit()
+       # loss needs some scaling to make sure gradients are not too large
+       loss = F.mse_loss(output , score ) / (100 * 100)
 
     self.log(loss_type, loss)
     return loss
