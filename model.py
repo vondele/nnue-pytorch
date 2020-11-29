@@ -72,7 +72,7 @@ class NNUE(pl.LightningModule):
        #       print(float(d[0]),float(d[1]),file=f)
        # quit()
        # loss needs some scaling to make sure gradients are not too large
-       loss = F.mse_loss(output , score ) / (100 * 100)
+       loss = F.mse_loss(output , score ) / (2400 * 2400)
 
     self.log(loss_type, loss)
     return loss
