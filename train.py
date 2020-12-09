@@ -43,17 +43,21 @@ def main():
   parser.add_argument("--smart-fen-skipping", action='store_true', dest='smart_fen_skipping', help="If enabled positions that are bad training targets will be skipped during loading. Default: False")
   parser.add_argument("--random-fen-skipping", default=0, type=int, dest='random_fen_skipping', help="skip fens randomly on average random_fen_skipping before using one.")
   parser.add_argument("--resume-from-model", dest='resume_from_model', help="Initializes training using the weights from the given .pt model")
+  parser.add_argument("--optimizer", default="ranger", dest='optimizer_algo_', choices=["ranger", "adagrad", "sgd", "adam"], help="a selected set of optimizers.")
+  parser.add_argument("--lr", default=None, type=float, dest='optimizer_lr_', help="Use to override default value of the lr of the selected algo")
   features.add_argparse_args(parser)
   args = parser.parse_args()
 
   feature_set = features.get_feature_set_from_name(args.features)
 
   if args.resume_from_model is None:
-    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_)
+    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, optimizer_algo_=args.optimizer_algo_, optimizer_lr_=args.optimizer_lr_)
   else:
     nnue = torch.load(args.resume_from_model)
     nnue.set_feature_set(feature_set)
     nnue.lambda_ = args.lambda_
+    nnue.optimizer_algo_ = args.optimizer_algo_
+    nnue.optimizer_lr_ = args.optimizer_lr_
 
   print("Feature set: {}".format(feature_set.name))
   print("Num real features: {}".format(feature_set.num_real_features))

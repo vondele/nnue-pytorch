@@ -19,7 +19,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0):
+  def __init__(self, feature_set, lambda_=1.0,  optimizer_algo_="ranger", optimizer_lr_=None):
     super(NNUE, self).__init__()
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
@@ -27,6 +27,8 @@ class NNUE(pl.LightningModule):
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
+    self.optimizer_algo_ = optimizer_algo_
+    self.optimizer_lr_ = optimizer_lr_
 
     self._zero_virtual_feature_weights()
 
@@ -127,5 +129,18 @@ class NNUE(pl.LightningModule):
     self.step_(batch, batch_idx, 'test_loss')
 
   def configure_optimizers(self):
-    optimizer = ranger.Ranger(self.parameters())
+    kwargs = dict(lr=self.optimizer_lr_)
+    kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+    if self.optimizer_algo_ == "ranger":
+       optimizer = ranger.Ranger(self.parameters(), **kwargs)
+    elif self.optimizer_algo_ == "adagrad":
+       optimizer = torch.optim.Adagrad(self.parameters(), **kwargs)
+    elif self.optimizer_algo_ == "adam":
+       optimizer = torch.optim.Adam(self.parameters(), **kwargs)
+    elif self.optimizer_algo_ == "sgd":
+       optimizer = torch.optim.SGD(self.parameters(), **kwargs)
+    else:
+       raise ValueError
+
     return optimizer
