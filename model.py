@@ -26,6 +26,7 @@ class NNUE(pl.LightningModule):
     self.l1 = nn.Linear(2 * L1, L2)
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
+    self.dropout = nn.Dropout(0.10)
     self.lambda_ = lambda_
 
     self._zero_virtual_feature_weights()
@@ -90,6 +91,7 @@ class NNUE(pl.LightningModule):
     # clamp here is used as a clipped relu to (0.0, 1.0)
     l0_ = torch.clamp(l0_, 0.0, 1.0)
     l1_ = torch.clamp(self.l1(l0_), 0.0, 1.0)
+    l1_ = self.dropout(l1_)
     l2_ = torch.clamp(self.l2(l1_), 0.0, 1.0)
     x = self.output(l2_)
     return x
