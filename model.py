@@ -114,8 +114,8 @@ class NNUE(pl.LightningModule):
     q, p = self(us, them, white, black)
     # Scale score by 600.0 to match the expected NNUE scaling factor
     value_loss = F.smooth_l1_loss(q, score / 600, beta = 0.5)
-    # Scale policy loss down by 5 so mse loss has a bit more weight (policy loss ~3)
-    policy_loss = F.cross_entropy(p, move.long()) / 50
+    # Scale policy loss down by 50 so mse loss has a bit more weight (policy loss ~3)
+    policy_loss = F.cross_entropy(p, move.long()) / (50 * self.lambda_)
     self.log(loss_type + '_value_loss', value_loss)
     self.log(loss_type + '_policy_loss', policy_loss)
     return value_loss + policy_loss
