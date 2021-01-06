@@ -6838,6 +6838,12 @@ namespace binpack
         {
             return pos.isCheck();
         }
+
+        [[nodiscard]] bool isModerateEval() const
+        {
+            return std::abs(score) > 1 && std::abs(score) < 800;
+        }
+
     };
 
     [[nodiscard]] inline TrainingDataEntry packedSfenValueToTrainingDataEntry(const nodchip::PackedSfenValue& psv)

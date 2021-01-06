@@ -416,7 +416,7 @@ extern "C" {
                 };
 
                 auto do_filter = [&]() {
-                    return (e.isCapturingMove() || e.isInCheck());
+                    return (e.isCapturingMove() || e.isInCheck() || !e.isModerateEval());
                 };
 
                 static thread_local std::mt19937 gen(std::random_device{}());
