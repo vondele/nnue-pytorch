@@ -398,21 +398,22 @@ private:
 
 extern "C" {
 
-    EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char* filename, int batch_size, bool cyclic, bool filtered, int random_fen_skipping)
+    EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char* filename, int batch_size, bool cyclic, bool filtered, int random_fen_skipping, int skipping_score_range)
     {
         std::function<bool(const TrainingDataEntry&)> skipPredicate = nullptr;
         if (filtered || random_fen_skipping)
         {
             skipPredicate = [
-                random_fen_skipping,
-                prob = double(random_fen_skipping) / (random_fen_skipping + 1),
+                random_fen_skipping, skipping_score_range,
+                prob = 1.0 / (random_fen_skipping + 1),
                 filtered
                 ](const TrainingDataEntry& e){
 
                 auto do_skip = [&]() {
-                    std::bernoulli_distribution distrib(prob);
+                    std::uniform_real_distribution<double> distrib(0, 1);
                     auto& prng = rng::get_thread_local_rng();
-                    return distrib(prng);
+                    double scaling = skipping_score_range > 0 ? std::pow(double(e.score) / skipping_score_range , 2) : 0.0;
+                    return distrib(prng) > (prob + scaling) / (1.0 + scaling);
                 };
 
                 auto do_filter = [&]() {
@@ -459,7 +460,7 @@ extern "C" {
 
 int main()
 {
-    auto stream = create_sparse_batch_stream("HalfKP", 4, "10m_d3_q_2.binpack", 8192, true, false, 0);
+    auto stream = create_sparse_batch_stream("HalfKP", 4, "10m_d3_q_2.binpack", 8192, true, false, 0, 0);
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 1000; ++i)
     {
