@@ -6841,7 +6841,7 @@ namespace binpack
 
         [[nodiscard]] bool isModerateEval() const
         {
-            return std::abs(score) > 1 && std::abs(score) < 800;
+            return std::abs(score) > 1 && std::abs(score) < 3800;
         }
 
     };

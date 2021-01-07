@@ -79,7 +79,7 @@ class NNUEVisualizer():
         # Plot image.
         plt.figure(figsize=(16, 9))
         plt.matshow(img.reshape((totaldim//totalx, totalx)),
-                    fignum=0, vmin=vmin, vmax=vmax, cmap='jet')
+                    fignum=0, vmin=vmin, vmax=vmax) #, cmap='jet')
         plt.colorbar(fraction=0.046, pad=0.04)
 
         line_options = {'color': 'black', 'linewidth': 0.5}
