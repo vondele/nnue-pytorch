@@ -36,6 +36,8 @@ def main():
   parser = pl.Trainer.add_argparse_args(parser)
   parser.add_argument("--py-data", action="store_true", help="Use python data loader (default=False)")
   parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
+  parser.add_argument("--scaling-net", default=361.0, type=float, dest='scaling_net_', help="scaling for the net score in the loss' function sigmoid")
+  parser.add_argument("--scaling-search", default=361.0, type=float, dest='scaling_search_', help="scaling for the search score in the loss' function sigmoid")
   parser.add_argument("--num-workers", default=1, type=int, dest='num_workers', help="Number of worker threads to use for data loading. Currently only works well for binpack.")
   parser.add_argument("--batch-size", default=-1, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default on GPU = 8192 on CPU = 128.")
   parser.add_argument("--threads", default=-1, type=int, dest='threads', help="Number of torch threads to use. Default automatic (cores) .")
@@ -48,12 +50,18 @@ def main():
 
   feature_set = features.get_feature_set_from_name(args.features)
 
+  print("Lambda: {}".format(args.lambda_))
+  print("Scaling net: {}".format(args.scaling_net_))
+  print("Scaling search: {}".format(args.scaling_search_))
+
   if args.resume_from_model is None:
-    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_)
+    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, scaling_net_=args.scaling_net_, scaling_search_=args.scaling_search_)
   else:
     nnue = torch.load(args.resume_from_model)
     nnue.set_feature_set(feature_set)
     nnue.lambda_ = args.lambda_
+    nnue.scaling_net_ = args.scaling_net_
+    nnue.scaling_search_ = args.scaling_search_
 
   print("Feature set: {}".format(feature_set.name))
   print("Num real features: {}".format(feature_set.num_real_features))

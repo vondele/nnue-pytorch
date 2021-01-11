@@ -19,7 +19,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0):
+  def __init__(self, feature_set, lambda_=1.0, scaling_net_=361, scaling_search_=361):
     super(NNUE, self).__init__()
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
@@ -27,6 +27,8 @@ class NNUE(pl.LightningModule):
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
+    self.scaling_net_ = scaling_net_
+    self.scaling_search_ = scaling_search_
 
     self._zero_virtual_feature_weights()
 
@@ -100,11 +102,10 @@ class NNUE(pl.LightningModule):
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
     # This needs to match the value used in the serializer
     nnue2score = 600
-    scaling = 361
 
-    q = self(us, them, white, black) * nnue2score / scaling
+    q = self(us, them, white, black) * nnue2score / self.scaling_net_
     t = outcome
-    p = (score / scaling).sigmoid()
+    p = (score / self.scaling_search_).sigmoid()
 
     epsilon = 1e-12
     teacher_entropy = -(p * (p + epsilon).log() + (1.0 - p) * (1.0 - p + epsilon).log())
