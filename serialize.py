@@ -46,8 +46,8 @@ class NNUEWriter():
     self.int32(VERSION) # version
     self.int32(FC_HASH ^ model.feature_set.hash) # halfkp network hash
     description = b"Features=HalfKP(Friend)[41024->256x2],"
-    description += b"Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32]"
-    description += b"(ClippedReLU[32](AffineTransform[32<-512](InputSlice[512(0:512)])))))"
+    description += b"Network=AffineTransform[1<-64](ClippedReLU[64](AffineTransform[64<-64]"
+    description += b"(ClippedReLU[64](AffineTransform[64<-512](InputSlice[512(0:512)])))))"
     self.int32(len(description)) # Network definition
     self.buf.extend(description)
 
@@ -77,7 +77,7 @@ class NNUEWriter():
 
   def write_fc_layer(self, layer, is_output=False):
     # FC layers are stored as int8 weights, and int32 biases
-    kWeightScaleBits = 6
+    kWeightScaleBits = 7
     kActivationScale = 127.0
     if not is_output:
       kBiasScale = (1 << kWeightScaleBits) * kActivationScale # = 8128
@@ -135,7 +135,7 @@ class NNUEReader():
 
   def read_fc_layer(self, layer, is_output=False):
     # FC layers are stored as int8 weights, and int32 biases
-    kWeightScaleBits = 6
+    kWeightScaleBits = 7
     kActivationScale = 127.0
     if not is_output:
       kBiasScale = (1 << kWeightScaleBits) * kActivationScale # = 8128
