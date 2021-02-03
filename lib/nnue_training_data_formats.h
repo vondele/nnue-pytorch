@@ -6828,6 +6828,11 @@ namespace binpack
             return pos.isMoveLegal(move);
         }
 
+        [[nodiscard]] bool isCheckingMove() const
+        {
+            return pos.isCheckAfterMove(move);
+        }
+
         [[nodiscard]] bool isCapturingMove() const
         {
             return pos.pieceAt(move.to) != chess::Piece::none() &&
