@@ -6830,7 +6830,7 @@ namespace binpack
 
         [[nodiscard]] bool isCheckingMove() const
         {
-            return pos.isCheckAfterMove(move);
+            return pos.afterMove(move).isCheck();
         }
 
         [[nodiscard]] bool isCapturingMove() const
