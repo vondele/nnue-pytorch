@@ -94,6 +94,13 @@ class NNUE(pl.LightningModule):
     x = self.output(l2_)
     return x
 
+  def on_after_backward(self):
+    w = self.input.weight
+    g = w.grad
+    a = self.feature_set.features[0].get_factor_base_feature('HalfK')
+    b = self.feature_set.features[0].get_factor_base_feature('P')
+    g[:, a:b] /= 10.0
+
   def step_(self, batch, batch_idx, loss_type):
     us, them, white, black, outcome, score = batch
 
