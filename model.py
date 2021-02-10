@@ -19,7 +19,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0):
+  def __init__(self, feature_set, lambda_=1.0, generic_param_=""):
     super(NNUE, self).__init__()
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
@@ -27,6 +27,7 @@ class NNUE(pl.LightningModule):
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
+    self.generic_param_ = generic_param_
 
     self._zero_virtual_feature_weights()
 
@@ -41,7 +42,11 @@ class NNUE(pl.LightningModule):
   def _zero_virtual_feature_weights(self):
     weights = self.input.weight
     for a, b in self.feature_set.get_virtual_feature_ranges():
-      weights[:, a:b] = 0.0
+      if self.generic_param_ == "wrongInit":
+         print("Using wrong Init!!")
+         weights[a:b,:] = 0.0
+      else:
+         weights[:, a:b] = 0.0
     self.input.weight = nn.Parameter(weights)
 
   '''
