@@ -183,7 +183,7 @@ class NNUEReader():
     psqtweights = self.tensor(numpy.int32, [shape[0], num_psqt_buckets])
     weights = weights.divide(127.0)
     psqtweights = psqtweights.divide(9600.0)
-    layer.weight.data = torch.cat([weights, psqtweights], dim=0)
+    layer.weight.data = torch.cat([weights, psqtweights], dim=1)
 
   def read_fc_layer(self, layer, is_output=False):
     # FC layers are stored as int8 weights, and int32 biases
