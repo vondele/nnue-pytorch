@@ -142,7 +142,8 @@ class NNUE(pl.LightningModule):
   def _init_layers(self):
     input_bias = self.input.bias
     with torch.no_grad():
-      input_bias[L1] = 0.0
+      for i in range(8):
+        input_bias[L1 + i] = 0.0
     self.input.bias = nn.Parameter(input_bias)
 
     self._zero_virtual_feature_weights()
