@@ -37,8 +37,10 @@ def main():
   parser = pl.Trainer.add_argparse_args(parser)
   parser.add_argument("--py-data", action="store_true", help="Use python data loader (default=False)")
   parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
+  parser.add_argument("--LR", default=1.5E-3, type=float, dest='LR_', help="Learning Rate (default=1.5E-3)")
+  parser.add_argument("--LRDecay", default=0.987, type=float, dest='LRDecay_', help="Learning Rate Decay (default=0.987)")
   parser.add_argument("--num-workers", default=1, type=int, dest='num_workers', help="Number of worker threads to use for data loading. Currently only works well for binpack.")
-  parser.add_argument("--batch-size", default=-1, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default on GPU = 8192 on CPU = 128.")
+  parser.add_argument("--batch-size", default=16384, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default 16384")
   parser.add_argument("--threads", default=-1, type=int, dest='threads', help="Number of torch threads to use. Default automatic (cores) .")
   parser.add_argument("--seed", default=42, type=int, dest='seed', help="torch seed to use.")
   parser.add_argument("--smart-fen-skipping", action='store_true', dest='smart_fen_skipping_deprecated', help="If enabled positions that are bad training targets will be skipped during loading. Default: True, kept for backwards compatibility. This option is ignored")
@@ -55,13 +57,19 @@ def main():
 
   feature_set = features.get_feature_set_from_name(args.features)
 
+  print("Param lambda: {}".format(args.lambda_))
+  print("Param LR: {}".format(args.LR_))
+  print("Param LRDecay: {}".format(args.LRDecay_))
+
   if args.resume_from_model is None:
-    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_)
+    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, LR_=args.LR_, LRDecay_=args.LRDecay_)
     nnue.cuda()
   else:
     nnue = torch.load(args.resume_from_model)
     nnue.set_feature_set(feature_set)
     nnue.lambda_ = args.lambda_
+    nnue.LR_ = args.LR_
+    nnue.LRDecay_ = args.LRDecay_
     nnue.cuda()
 
   print("Feature set: {}".format(feature_set.name))
@@ -75,8 +83,6 @@ def main():
   print("Seed {}".format(args.seed))
 
   batch_size = args.batch_size
-  if batch_size <= 0:
-    batch_size = 16384
   print('Using batch size {}'.format(batch_size))
 
   print('Smart fen skipping: {}'.format(not args.no_smart_fen_skipping))
