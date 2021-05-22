@@ -39,6 +39,8 @@ def main():
   parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
   parser.add_argument("--LR", default=1.5E-3, type=float, dest='LR_', help="Learning Rate (default=1.5E-3)")
   parser.add_argument("--LRDecay", default=0.987, type=float, dest='LRDecay_', help="Learning Rate Decay (default=0.987)")
+  parser.add_argument("--in-scaling", default=410, type=int, dest='in_scaling_', help="Scaling for input evals in loss functions")
+  parser.add_argument("--out-scaling", default=361, type=int, dest='out_scaling_', help="Scaling for output evals in loss functions")
   parser.add_argument("--num-workers", default=1, type=int, dest='num_workers', help="Number of worker threads to use for data loading. Currently only works well for binpack.")
   parser.add_argument("--batch-size", default=16384, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default 16384")
   parser.add_argument("--threads", default=-1, type=int, dest='threads', help="Number of torch threads to use. Default automatic (cores) .")
@@ -60,9 +62,11 @@ def main():
   print("Param lambda: {}".format(args.lambda_))
   print("Param LR: {}".format(args.LR_))
   print("Param LRDecay: {}".format(args.LRDecay_))
+  print("Param in-scaling: {}".format(args.in_scaling_))
+  print("Param out-scaling: {}".format(args.out_scaling_))
 
   if args.resume_from_model is None:
-    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, LR_=args.LR_, LRDecay_=args.LRDecay_)
+    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, LR_=args.LR_, LRDecay_=args.LRDecay_, in_scaling_=args.in_scaling_, out_scaling_=args.out_scaling_)
     nnue.cuda()
   else:
     nnue = torch.load(args.resume_from_model)
@@ -70,6 +74,8 @@ def main():
     nnue.lambda_ = args.lambda_
     nnue.LR_ = args.LR_
     nnue.LRDecay_ = args.LRDecay_
+    nnue.in_scaling_ = args.in_scaling_
+    nnue.out_scaling_ = args.out_scaling_
     nnue.cuda()
 
   print("Feature set: {}".format(feature_set.name))

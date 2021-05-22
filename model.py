@@ -120,7 +120,8 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0, LR_=1.5E-3, LRDecay_=0.987):
+
+  def __init__(self, feature_set, lambda_=1.0, LR_=1.5E-3, LRDecay_=0.987, in_scaling_=410, out_scaling_=361):
     super(NNUE, self).__init__()
     self.num_psqt_buckets = feature_set.num_psqt_buckets
     self.num_ls_buckets = feature_set.num_ls_buckets
@@ -130,6 +131,8 @@ class NNUE(pl.LightningModule):
     self.lambda_ = lambda_
     self.LR_ = LR_
     self.LRDecay_ = LRDecay_
+    self.in_scaling_ = in_scaling_
+    self.out_scaling_ = out_scaling_
 
     self.weight_clipping = [
       {'params' : [self.layer_stacks.l1.weight], 'min_weight' : -127/64, 'max_weight' : 127/64, 'virtual_params' : self.layer_stacks.l1_fact.weight },
@@ -267,8 +270,8 @@ class NNUE(pl.LightningModule):
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
     # This needs to match the value used in the serializer
     nnue2score = 600
-    in_scaling = 410
-    out_scaling = 361
+    in_scaling = self.in_scaling_
+    out_scaling = self.out_scaling_
 
     q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * nnue2score / out_scaling).sigmoid()
     t = outcome
