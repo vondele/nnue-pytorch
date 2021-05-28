@@ -341,13 +341,34 @@ struct SparseBatch
 
 private:
 
+    size_t select_bucket(const Board& pos)
+    {
+      size_t bucket;
+      if (pos.pieceCount(PieceType::Queen) > 0)
+         bucket = 3 * (pos.piecesBB().count() - 1) / 32;
+      else
+      {
+         if (pos.pieceCount(PieceType::Knight) + pos.pieceCount(PieceType::Bishop) > 0)
+            bucket = 3 + 3 * (pos.piecesBB().count() - 1) / 32;
+         else
+         {
+            if (pos.pieceCount(PieceType::Rook) > 0)
+               bucket = 6; // rooks + pawns
+            else
+               bucket = 7; // pawns only
+         }
+      }
+
+      return bucket;
+    }
+
     template <typename... Ts>
     void fill_entry(FeatureSet<Ts...>, int i, const TrainingDataEntry& e)
     {
         is_white[i] = static_cast<float>(e.pos.sideToMove() == Color::White);
         outcome[i] = (e.result + 1.0f) / 2.0f;
         score[i] = e.score;
-        psqt_indices[i] = (e.pos.piecesBB().count() - 1) / 4;
+        psqt_indices[i] = select_bucket(e.pos);
         layer_stack_indices[i] = psqt_indices[i];
         fill_features(FeatureSet<Ts...>{}, i, e);
     }

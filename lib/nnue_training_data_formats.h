@@ -4337,9 +4337,14 @@ namespace chess
             return bb;
         }
 
-        [[nodiscard]] constexpr std::uint8_t pieceCount(Piece pt) const
+        [[nodiscard]] constexpr std::uint8_t pieceCount(Piece pc) const
         {
-            return m_pieceCount[pt];
+            return m_pieceCount[pc];
+        }
+
+        [[nodiscard]] constexpr std::uint8_t pieceCount(PieceType pt) const
+        {
+            return m_pieceCount[Piece(pt, Color::White)] + m_pieceCount[Piece(pt, Color::Black)];
         }
 
         [[nodiscard]] constexpr bool isPromotion(Square from, Square to) const
