@@ -271,9 +271,8 @@ class NNUE(pl.LightningModule):
     t = outcome
     p = (score / in_scaling).sigmoid()
 
-    loss_eval = (p - q).square().mean()
-    loss_result = (p - t).square().mean()
-    loss = self.lambda_ * loss_eval + (1.0 - self.lambda_) * loss_result
+    loss_eval = (p - q).abs().pow(self.lambda_).mean()
+    loss = loss_eval
 
     self.log(loss_type, loss)
 
