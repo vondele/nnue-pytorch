@@ -6857,7 +6857,7 @@ namespace binpack
 
         [[nodiscard]] bool isR50Allowed() const
         {
-            return std::abs(pos.rule50Counter() - 50) > 40;
+            return pos.rule50Counter() > 1 && pos.rule50Counter() < 10;
         }
     };
 
