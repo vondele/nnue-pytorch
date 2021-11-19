@@ -6854,6 +6854,11 @@ namespace binpack
         {
             return pos.isCheck();
         }
+
+        [[nodiscard]] bool isR50Allowed() const
+        {
+            return std::abs(pos.rule50Counter() - 50) > 40;
+        }
     };
 
     [[nodiscard]] inline TrainingDataEntry packedSfenValueToTrainingDataEntry(const nodchip::PackedSfenValue& psv)
