@@ -818,6 +818,12 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             filtered
             ](const TrainingDataEntry& e){
 
+            auto do_score_skip = [&]() {
+                std::bernoulli_distribution distrib(1.0 - e.score_result_prob());
+                auto& prng = rng::get_thread_local_rng();
+                return distrib(prng);
+            };
+
             auto do_skip = [&]() {
                 std::bernoulli_distribution distrib(prob);
                 auto& prng = rng::get_thread_local_rng();
@@ -829,7 +835,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             };
 
             static thread_local std::mt19937 gen(std::random_device{}());
-            return (random_fen_skipping && do_skip()) || (filtered && do_filter());
+            return (random_fen_skipping && do_skip()) || (filtered && do_filter()) || do_score_skip();
         };
     }
 
