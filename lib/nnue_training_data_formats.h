@@ -6855,9 +6855,9 @@ namespace binpack
             return pos.isCheck();
         }
 
-        [[nodiscard]] bool isR50Allowed() const
+        [[nodiscard]] bool isOpening() const
         {
-            return pos.rule50Counter() < 10;
+            return ply < 20;
         }
     };
 
