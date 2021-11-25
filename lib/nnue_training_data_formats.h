@@ -6881,10 +6881,10 @@ namespace binpack
         double score_result_prob() const {
            auto [w, l, d] = win_rate_model();
            if (result > 0)
-               return w;
+               return w*w;
            if (result < 0)
-               return l;
-           return d;
+               return l*l;
+           return d*d;
         }
 
         [[nodiscard]] bool isInCheck() const
