@@ -6868,7 +6868,7 @@ namespace binpack
            double b = (((bs[0] * m + bs[1]) * m + bs[2]) * m) + bs[3];
 
            // tweak
-           b *= 1.5;
+           b /= 1.5;
 
            // Transform eval to centipawns with limited range
            double x = std::clamp(double(100 * score) / 208, -2000.0, 2000.0);
