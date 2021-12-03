@@ -273,7 +273,7 @@ class NNUE(pl.LightningModule):
 
     pt = p * self.lambda_ + t * (1.0 - self.lambda_)
 
-    loss = torch.pow(torch.abs(pt - q), 2.4).mean()
+    loss = torch.pow(torch.abs(pt - q), 2.8).mean()
 
     self.log(loss_type, loss)
 
