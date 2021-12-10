@@ -7746,7 +7746,7 @@ namespace binpack
         CompressedTrainingDataFile m_inputFile;
         std::atomic_int m_numRunningWorkers;
 
-        static constexpr int threadBufferSize = 256 * 256 * 16;
+        static constexpr int threadBufferSize = 256 * 256 * 16 * 8;
 
         std::atomic_bool m_stopFlag;
         std::vector<TrainingDataEntry> m_waitingBuffer;
