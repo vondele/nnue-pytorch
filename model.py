@@ -265,7 +265,7 @@ class NNUE(pl.LightningModule):
     # This needs to match the value used in the serializer
     nnue2score = 600
     in_scaling = 410 - 50
-    out_scaling = 361
+    out_scaling = 361 - 50
 
     q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * nnue2score / out_scaling).sigmoid()
     t = outcome
