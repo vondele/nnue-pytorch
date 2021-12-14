@@ -264,8 +264,8 @@ class NNUE(pl.LightningModule):
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
     # This needs to match the value used in the serializer
     nnue2score = 600
-    in_scaling = 410 + 25
-    out_scaling = 361 + 50
+    in_scaling = 410 + 50
+    out_scaling = 361 + 25
 
     q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * nnue2score / out_scaling).sigmoid()
     t = outcome
