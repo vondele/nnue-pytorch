@@ -295,7 +295,7 @@ class NNUE(pl.LightningModule):
 
   def configure_optimizers(self):
     # Train with a lower LR on the output layer
-    LR = 8.75e-4
+    LR = 8.75e-4 / 10
     train_params = [
       {'params' : get_parameters([self.input]), 'lr' : LR, 'gc_dim' : 0 },
       {'params' : [self.layer_stacks.l1_fact.weight], 'lr' : LR },
@@ -307,7 +307,7 @@ class NNUE(pl.LightningModule):
       {'params' : [self.layer_stacks.output.bias], 'lr' : LR },
     ]
     # increasing the eps leads to less saturated nets with a few dead neurons
-    optimizer = ranger.Ranger(train_params, betas=(.9, 0.999), eps=1.0e-7, gc_loc=False, use_gc=False)
+    optimizer = ranger.Ranger(train_params, betas=(.9, 0.999), eps=1.0e-5, gc_loc=False, use_gc=False)
     # Drop learning rate after 75 epochs
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.992)
     return [optimizer], [scheduler]
