@@ -832,7 +832,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             };
 
             auto do_filter = [&]() {
-                return (e.isCapturingMove() || e.isInCheck());
+                return (e.isCapturingMove() || e.isInCheck() || e.isCheckingMove());
             };
 
             static thread_local std::mt19937 gen(std::random_device{}());

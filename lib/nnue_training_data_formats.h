@@ -6852,6 +6852,11 @@ namespace binpack
                    pos.pieceAt(move.to).color() != pos.pieceAt(move.from).color(); // Exclude castling
         }
 
+        [[nodiscard]] bool isCheckingMove() const
+        {
+            return pos.isCheckAfterMove(move);
+        }
+
         // The win rate model returns the probability (per mille) of winning given an eval
         // and a game-ply. The model fits rather accurately the LTC fishtest statistics.
         std::tuple<double, double, double> win_rate_model() const {
