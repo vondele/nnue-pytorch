@@ -127,7 +127,7 @@ class NNUE(pl.LightningModule):
 
   lr - the initial learning rate
   """
-  def __init__(self, feature_set, lambda_=1.0, gamma=0.992, lr=8.75e-4, num_psqt_buckets=8, num_ls_buckets=8):
+  def __init__(self, feature_set, lambda_=1.0, gamma=0.992, lr=8.75e-4, num_psqt_buckets=16, num_ls_buckets=16):
     super(NNUE, self).__init__()
     self.num_psqt_buckets = num_psqt_buckets
     self.num_ls_buckets = num_ls_buckets
