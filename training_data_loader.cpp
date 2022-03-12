@@ -434,7 +434,11 @@ private:
         is_white[i] = static_cast<float>(e.pos.sideToMove() == Color::White);
         outcome[i] = (e.result + 1.0f) / 2.0f;
         score[i] = e.score;
-        psqt_indices[i] = (e.pos.piecesBB().count() - 1) / 4;
+        psqt_indices[i] =std::min(7,(    (e.pos.piecesBB(Piece(PieceType::Pawn,   Color::White)).count() + e.pos.piecesBB(Piece(PieceType::Pawn,   Color::Black)).count()) +
+                                     3 * (e.pos.piecesBB(Piece(PieceType::Knight, Color::White)).count() + e.pos.piecesBB(Piece(PieceType::Knight, Color::Black)).count()) +
+                                     3 * (e.pos.piecesBB(Piece(PieceType::Bishop, Color::White)).count() + e.pos.piecesBB(Piece(PieceType::Bishop, Color::Black)).count()) +
+                                     5 * (e.pos.piecesBB(Piece(PieceType::Rook,   Color::White)).count() + e.pos.piecesBB(Piece(PieceType::Rook,   Color::Black)).count()) +
+                                     9 * (e.pos.piecesBB(Piece(PieceType::Queen,  Color::White)).count() + e.pos.piecesBB(Piece(PieceType::Queen,  Color::Black)).count())) * 8 / 78);
         layer_stack_indices[i] = psqt_indices[i];
         fill_features(FeatureSet<Ts...>{}, i, e);
     }
