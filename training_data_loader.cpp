@@ -835,8 +835,33 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
                 return (e.isCapturingMove() || e.isInCheck());
             };
 
+            // Reference counts of how often a position with N pieces appears in eval
+            constexpr std::array<std::uint64_t, 33> countRef = {
+                   0, 0, 0, 1, 19, 157, 355, 396, 669, 780, 986, 805, 851, 659,
+                   718, 565, 684, 526, 573, 472, 489, 368, 384, 341, 331, 316,
+                   276, 252, 165, 141, 64, 54, 16};
+            constexpr std::uint64_t countRefTotal = 12413;
+            static thread_local std::array<std::uint64_t, 33> countNow = {};
+            static thread_local std::uint64_t countNowTotal = 0;
             static thread_local std::mt19937 gen(std::random_device{}());
-            return (random_fen_skipping && do_skip()) || (filtered && do_filter()) || (wld_filtered && do_wld_skip());
+
+            bool skipIt = (random_fen_skipping && do_skip()) || (filtered && do_filter()) || (wld_filtered && do_wld_skip());
+
+            if (!skipIt)
+            {
+               int Npieces = e.pos.piecesBB().count();
+               if (countRef[Npieces] * countNowTotal < countNow[Npieces] * countRefTotal)
+               {
+                   skipIt = true;
+               }
+               else
+               {
+                   countNow[Npieces]++;
+                   countNowTotal++;
+               }
+            }
+
+            return skipIt;
         };
     }
 
