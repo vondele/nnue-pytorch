@@ -819,6 +819,40 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             wld_filtered
             ](const TrainingDataEntry& e){
 
+            static constexpr double desired_piece_count_weights[33] = {
+                1,
+                1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1
+            };
+
+            static constexpr double desired_piece_count_weights_total = [](){
+                double tot = 0;
+                for (auto w : desired_piece_count_weights)
+                    tot += w;
+                return tot;
+            }();
+
+            // Configuration to correct for outlier piece counts that cannot be saturated.
+            static constexpr double outlier_threshold = 0.1;
+            static constexpr int max_outliers = 8;
+            static constexpr uint64_t outlier_update_period = 10000;
+            static thread_local double outlier_corrected_piece_count_weights_total = desired_piece_count_weights_total;
+
+            static thread_local std::mt19937 gen(std::random_device{}());
+            static thread_local double piece_count_history_all[33] = {0};
+            static thread_local double piece_count_history_passed[33] = {0};
+            static thread_local double piece_count_history_all_total = 0;
+            static thread_local double piece_count_history_passed_total = 0;
+
+            // Won't flatten the original distribution by more than this factor.
+            static constexpr double max_allowed_piece_count_distribution_flatten_factor = 4.0;
+
+            // change this to a higher value to allow bigger deviations.
+            // Allowing bigger deviations may increase throughput if the data is not consistently distributed.
+            static constexpr double max_allowed_piece_count_distribution_deviation = 0.05;
+
             auto do_wld_skip = [&]() {
                 std::bernoulli_distribution distrib(1.0 - e.score_result_prob());
                 auto& prng = rng::get_thread_local_rng();
@@ -835,8 +869,59 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
                 return (e.isCapturingMove() || e.isInCheck());
             };
 
-            static thread_local std::mt19937 gen(std::random_device{}());
-            return (random_fen_skipping && do_skip()) || (filtered && do_filter()) || (wld_filtered && do_wld_skip());
+            if (random_fen_skipping && do_skip())
+                return true;
+
+            if (filtered && do_filter())
+                return true;
+
+            if (wld_filtered && do_wld_skip())
+                return true;
+
+            constexpr bool do_debug_print = false;
+            if (do_debug_print) {
+                if (uint64_t(piece_count_history_all_total) % 10000 == 0) {
+                    std::cout << "Total : " << piece_count_history_all_total << '\n';
+                    std::cout << "Passed: " << piece_count_history_passed_total << '\n';
+                    for (int i = 0; i < 33; ++i)
+                        std::cout << i << ' ' << piece_count_history_passed[i] << '\n';
+                }
+            }
+
+            const int pc = e.pos.piecesBB().count();
+            piece_count_history_all[pc] += 1;
+            piece_count_history_all_total += 1;
+
+            // Make the outliers not count toward the total weight.
+            // This avoids the problem of underestimating the maximum number of "passed"
+            // positions for other piece counts. Otherwise it leads to too much skipping
+            // and increase in the relative presence of piece counts that are past the
+            // max distribution flattening of max_allowed_piece_count_distribution_flatten_factor.
+            if (uint64_t(piece_count_history_all) % outlier_update_period) {
+                double tmp[33];
+                for (int i = 0; i < 33; ++i)
+                    tmp[i] = piece_count_history_passed[i] / desired_piece_count_weights[i];
+                std::sort(tmp, tmp+33);
+                outlier_corrected_piece_count_weights_total = 0.0;
+                int i = 0;
+                while(i < max_outliers && tmp[i] >= 1.0 - outlier_threshold)
+                    ++i;
+                for (; i < 33; ++i)
+                    outlier_corrected_piece_count_weights_total += desired_piece_count_weights[i];
+            }
+
+            // don't flatten the original distribution by more than max_allowed_piece_count_distribution_flatten_factor times.
+            if (piece_count_history_passed[pc] * max_allowed_piece_count_distribution_flatten_factor >= piece_count_history_all[pc]) {
+                const double skip_threshold_weight_1 = piece_count_history_passed_total * (1.0 / outlier_corrected_piece_count_weights_total);
+                const double skip_threshold = skip_threshold_weight_1 * desired_piece_count_weights[pc] * (1.0 + max_allowed_piece_count_distribution_deviation) + 1;
+                if (piece_count_history_passed[pc] > skip_threshold)
+                    return true;
+            }
+
+            piece_count_history_passed[pc] += 1;
+            piece_count_history_passed_total += 1;
+
+            return false;
         };
     }
 
