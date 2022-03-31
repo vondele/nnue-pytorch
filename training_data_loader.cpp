@@ -847,7 +847,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             static thread_local double piece_count_history_passed_total = 0;
 
             // Won't flatten the original distribution by more than this factor.
-            static constexpr double max_allowed_piece_count_distribution_flatten_factor = 4.0;
+            static constexpr double max_allowed_piece_count_distribution_flatten_factor = 30.0;
 
             // change this to a higher value to allow bigger deviations.
             // Allowing bigger deviations may increase throughput if the data is not consistently distributed.
