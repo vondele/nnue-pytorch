@@ -819,7 +819,9 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             wld_filtered
             ](const TrainingDataEntry& e){
 
-            static constexpr double desired_piece_count_weights[33] = {
+            constexpr size_t Nweights = 33 * 2;
+            static constexpr double desired_piece_count_weights[Nweights] = {
+1.000000, 1.121094, 1.234375, 1.339844, 1.437500, 1.527344, 1.609375, 1.683594, 1.750000, 1.808594, 1.859375, 1.902344, 1.937500, 1.964844, 1.984375, 1.996094, 2.000000, 1.996094, 1.984375, 1.964844, 1.937500, 1.902344, 1.859375, 1.808594, 1.750000, 1.683594, 1.609375, 1.527344, 1.437500, 1.339844, 1.234375, 1.121094, 1.000000,
 1.000000, 1.121094, 1.234375, 1.339844, 1.437500, 1.527344, 1.609375, 1.683594, 1.750000, 1.808594, 1.859375, 1.902344, 1.937500, 1.964844, 1.984375, 1.996094, 2.000000, 1.996094, 1.984375, 1.964844, 1.937500, 1.902344, 1.859375, 1.808594, 1.750000, 1.683594, 1.609375, 1.527344, 1.437500, 1.339844, 1.234375, 1.121094, 1.000000
             };
 
@@ -834,8 +836,8 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
 
             // keep stats on passing pieces
             static thread_local double alpha = 1;
-            static thread_local double piece_count_history_all[33] = {0};
-            static thread_local double piece_count_history_passed[33] = {0};
+            static thread_local double piece_count_history_all[Nweights] = {0};
+            static thread_local double piece_count_history_passed[Nweights] = {0};
             static thread_local double piece_count_history_all_total = 0;
             static thread_local double piece_count_history_passed_total = 0;
 
@@ -872,19 +874,19 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
                 if (uint64_t(piece_count_history_all_total) % 10000 == 0) {
                     std::cout << "Total : " << piece_count_history_all_total << '\n';
                     std::cout << "Passed: " << piece_count_history_passed_total << '\n';
-                    for (int i = 0; i < 33; ++i)
+                    for (int i = 0; i < Nweights; ++i)
                         std::cout << i << ' ' << piece_count_history_passed[i] << '\n';
                 }
             }
 
-            const int pc = e.pos.piecesBB().count();
+            const int pc = e.pos.piecesBB().count() + 33 * (e.result == 0);
             piece_count_history_all[pc] += 1;
             piece_count_history_all_total += 1;
 
             // update alpha, which scales the filtering probability, to a maximum rate.
             if (uint64_t(piece_count_history_all_total) % 10000 == 0) {
                 double pass = piece_count_history_all_total * desired_piece_count_weights_total;
-                for (int i = 0; i < 33; ++i)
+                for (int i = 0; i < Nweights; ++i)
                 {
                     if (desired_piece_count_weights[pc] > 0)
                     {
