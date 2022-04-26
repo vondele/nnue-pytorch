@@ -879,7 +879,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
                 }
             }
 
-            bool critical_range = (std::abs(e.score) > 50 * 208 / 100) && (std::abs(e.score) < 400 * 208 / 100);
+            bool critical_range = (std::abs(e.score) > 100 * 208 / 100);
             const int pc = e.pos.piecesBB().count() + 33 * critical_range;
             piece_count_history_all[pc] += 1;
             piece_count_history_all_total += 1;
