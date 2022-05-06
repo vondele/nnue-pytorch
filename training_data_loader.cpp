@@ -822,7 +822,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             static constexpr std::array<double, 33> desired_piece_count_weights = [](){
                      std::array<double, 33> tmp = {};
                      constexpr double peakpos = 12;
-                     constexpr double peakadd = 2;
+                     constexpr double peakadd = 1;
                      for (int i=0; i<=32; i++)
                           tmp[i] = 1 + peakadd * (i <= peakpos ? double(i) / peakpos : double(32 - i) / double(32 - peakpos)) ;
                      return tmp;
