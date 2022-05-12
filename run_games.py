@@ -6,6 +6,26 @@ import time
 import argparse
 import features
 import shutil
+import threading
+
+class GameParams:
+    def __init__(self, hash, threads, games_per_round, time_per_move=None, time_increment_per_move=None, nodes_per_move=None):
+        self.hash = hash
+        self.threads = threads
+        self.games_per_round = games_per_round
+        self.time_per_move = time_per_move
+        self.time_increment_per_move = time_increment_per_move
+        self.nodes_per_move = nodes_per_move
+
+        if not time_per_move and not time_increment_per_move and not nodes_per_move:
+            raise Exception('Invalid TC specification.')
+
+    def get_stringified_tc(self):
+        if self.nodes_per_move:
+            return f'tc=10000+10000 nodes={self.nodes_per_move}'
+        else:
+            inc = self.time_increment_per_move or 0
+            return f'tc={self.time_per_move}+{inc}'
 
 
 def convert_ckpt(root_dir,features):
@@ -25,10 +45,9 @@ def convert_ckpt(root_dir,features):
         nnue_file_name = re.sub("default/version_[0-9]+/checkpoints/", "", ckpt)
         nnue_file_name = re.sub(r"epoch\=([0-9]+).*\.ckpt", r"nn-epoch\1.nnue", nnue_file_name)
         if not os.path.exists(nnue_file_name) and os.path.exists(ckpt):
-            command = "{} serialize.py {} {} --features={} ".format(sys.executable, ckpt, nnue_file_name, features)
-            ret = os.system(command)
-            if ret != 0:
-                print("Error serializing!")
+            with subprocess.Popen([sys.executable, 'serialize.py', ckpt, nnue_file_name, f'--features={features}']) as process:
+                if process.wait():
+                    print("Error serializing!")
 
 
 def find_nnue(root_dir):
@@ -64,15 +83,13 @@ def parse_ordo(root_dir, nnues):
     return ordo_scores
 
 
-def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfish_base, stockfish_test):
+def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfish_base, stockfish_test, game_params):
     """ Run a match using c-chess-cli adding pgns to a file to be analysed with ordo """
-    pgn_file_name = os.path.join(root_dir, "out.pgn")
-    command = "{} -each tc=4+0.04 option.Hash=8 option.Threads=1 -gauntlet -games 200 -rounds 1 -concurrency {}".format(
-        c_chess_exe, concurrency
-    )
+    pgn_file_name = os.path.join(root_dir, "out_temp.pgn")
+    command = f"{c_chess_exe} -each " + game_params.get_stringified_tc() + f" option.Hash={game_params.hash} option.Threads={game_params.threads} -gauntlet -games {game_params.games_per_round} -rounds 1 -concurrency {concurrency}"
     command = (
         command
-        + " -openings file={} order=random -repeat -resign 3 700 -draw 8 10".format(
+        + " -openings file={} order=random -repeat -resign count=3 score=700 -draw count=8 score=10".format(
             book_file_name
         )
     )
@@ -81,13 +98,17 @@ def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfis
         command = command + " -engine cmd={} name={} option.EvalFile={}".format(
             stockfish_test, net, os.path.join(os.getcwd(), net)
         )
-    command = command + " -pgn {} 0 2>&1".format(
+    command = command + " -pgn {} 0".format(
         pgn_file_name
     )
 
     print("Running match with c-chess-cli ... {}".format(pgn_file_name), flush=True)
     c_chess_out = open(os.path.join(root_dir, "c_chess.out"), 'w')
-    process = subprocess.Popen("stdbuf -o0 " + command, stdout=subprocess.PIPE, shell=True)
+    if sys.platform == "win32":
+        # sadly the lack of stdbuf is an issue on windows, but it still gets updated at some point at least...
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    else:
+        process = subprocess.Popen("stdbuf -o0 " + command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     seen = {}
     for line in process.stdout:
         line = line.decode('utf-8')
@@ -98,25 +119,31 @@ def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfis
                 sys.stdout.write('\n')
             seen[epoch_num.group(1)] = True
             sys.stdout.write('\r' + line.rstrip())
+            sys.stdout.flush()
     sys.stdout.write('\n')
     c_chess_out.close()
     if process.wait() != 0:
         print("Error running match!")
 
+    print("Finished running match.")
 
 def run_ordo(root_dir, ordo_exe, concurrency):
     """ run an ordo calcuation on an existing pgn file """
     pgn_file_name = os.path.join(root_dir, "out.pgn")
     ordo_file_name = os.path.join(root_dir, "ordo.out")
+    ordo_file_name_temp = os.path.join(root_dir, "ordo_temp.out")
     command = "{} -q -G -J  -p  {} -a 0.0 --anchor=master --draw-auto --white-auto -s 100 --cpus={} -o {}".format(
-        ordo_exe, pgn_file_name, concurrency, ordo_file_name
+        ordo_exe, pgn_file_name, concurrency, ordo_file_name_temp
     )
 
     print("Running ordo ranking ... {}".format(ordo_file_name), flush=True)
     ret = os.system(command)
     if ret != 0:
         print("Error running ordo!")
+    else:
+        os.replace(ordo_file_name_temp, ordo_file_name)
 
+    print("Finished running ordo.")
 
 def run_round(
     root_dir,
@@ -128,6 +155,7 @@ def run_round(
     book_file_name,
     concurrency,
     features,
+    game_params
 ):
     """ run a round of games, finding existing nets, analyze an ordo file to pick most suitable ones, run a round, and run ordo """
 
@@ -175,11 +203,35 @@ def run_round(
             break
 
     # run these nets against master...
-    run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfish_base, stockfish_test)
-
     # and run a new ordo ranking for the games played so far
-    run_ordo(root_dir, ordo_exe, concurrency)
+    run_match_thread = threading.Thread(
+        target=run_match,
+        args=(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfish_base, stockfish_test, game_params)
+    )
+    run_ordo_thread = threading.Thread(
+        target=run_ordo,
+        args=(root_dir, ordo_exe, concurrency)
+    )
+    run_match_thread.start()
+    run_ordo_thread.start()
 
+    run_match_thread.join()
+    run_ordo_thread.join()
+
+    # we write current match info to a temporary file and then copy back
+    # to allow ordo to run in parallel (since it's single threaded and may take a long time)
+    # we then append the new games to the main file
+    main_pgn_file_name = os.path.join(root_dir, "out.pgn")
+    curr_pgn_file_name = os.path.join(root_dir, "out_temp.pgn")
+    if not os.path.exists(main_pgn_file_name):
+        with open(main_pgn_file_name, 'w'): pass
+    try:
+        with open(main_pgn_file_name, 'a') as file_to:
+            with open(curr_pgn_file_name, 'r') as file_from:
+                for line in file_from:
+                    file_to.write(line)
+    except:
+        print('Something went wrong when adding new games to the main file.')
 
 def main():
     # basic setup
@@ -236,6 +288,37 @@ def main():
         default="./noob_3moves.epd",
         help="Path to a suitable book, see https://github.com/official-stockfish/books",
     )
+    parser.add_argument(
+        "--time_per_move",
+        type=float,
+        default=4.0
+    )
+    parser.add_argument(
+        "--time_increment_per_move",
+        type=float,
+        default=0.04
+    )
+    parser.add_argument(
+        "--nodes_per_move",
+        type=int,
+        default=None,
+        help="Overrides time per move."
+    )
+    parser.add_argument(
+        "--hash",
+        type=int,
+        default=8
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1
+    )
+    parser.add_argument(
+        "--games_per_round",
+        type=int,
+        default=200
+    )
     features.add_argparse_args(parser)
     args = parser.parse_args()
 
@@ -270,6 +353,7 @@ def main():
             args.book_file_name,
             args.concurrency,
             args.features,
+            GameParams(args.hash, args.threads, args.games_per_round, args.time_per_move, args.time_increment_per_move, args.nodes_per_move)
         )
 
 
