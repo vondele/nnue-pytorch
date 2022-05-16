@@ -7,6 +7,7 @@ import argparse
 import features
 import shutil
 import threading
+from pathlib import Path
 
 class GameParams:
     def __init__(self, hash, threads, games_per_round, time_per_move=None, time_increment_per_move=None, nodes_per_move=None):
@@ -48,12 +49,8 @@ def convert_ckpt(root_dir,features):
     """ Find the list of checkpoints that are available, and convert those that have no matching .nnue """
     # run96/run0/default/version_0/checkpoints/epoch=3.ckpt, or epoch=3-step=321151.ckpt
     p = re.compile("epoch.*\.ckpt")
-    ckpts = []
-    for path, subdirs, files in os.walk(root_dir, followlinks=False):
-        for filename in files:
-            m = p.match(filename)
-            if m:
-                ckpts.append(os.path.join(path, filename))
+
+    ckpts = [str(file) for file in Path(root_dir).rglob("epoch*.ckpt")]
 
     # lets move the .nnue files a bit up in the tree, and get rid of the = sign.
     # run96/run0/default/version_0/checkpoints/epoch=3.ckpt -> run96/run0/nn-epoch3.nnue
@@ -68,14 +65,7 @@ def convert_ckpt(root_dir,features):
 
 def find_nnue(root_dir):
     """ Find the set of nnue nets that are available for testing, going through the full subtree """
-    p = re.compile("nn-epoch[0-9]*.nnue")
-    nnues = []
-    for path, subdirs, files in os.walk(root_dir, followlinks=False):
-        for filename in files:
-            m = p.match(filename)
-            if m:
-                nnues.append(os.path.join(path, filename))
-    return nnues
+    return [str(file) for file in Path(root_dir).rglob("nn-epoch*.nnue")]
 
 
 def parse_ordo(root_dir, nnues):
