@@ -461,7 +461,7 @@ class TrainingRun(Thread):
             bufsize=-1,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            #stderr=subprocess.STDOUT, # keep errors printed to cli for now
+            stderr=subprocess.STDOUT,
         )
         terminate_process_on_exit(self._process)
 
