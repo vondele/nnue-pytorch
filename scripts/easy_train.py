@@ -465,17 +465,14 @@ class TrainingRun(Thread):
         )
         terminate_process_on_exit(self._process)
 
-        buffer = None
-        reader = io.TextIOWrapper(self._process.stdout, encoding='utf8')
+        reader = io.TextIOWrapper(self._process.stdout)
         while self._process.poll() is None and self._running:
             if not self._running:
                 break
-            char = reader.read(1)
+            line = reader.readline().strip()
             if not self._has_finished:
-                if buffer is None and char == 'E':
-                    buffer = 'E'
-                elif buffer is not None and char == ']':
-                    matches = TrainingRun.ITERATION_PATTERN.search(buffer)
+                try:
+                    matches = TrainingRun.ITERATION_PATTERN.search(line)
                     if matches:
                         self._current_epoch = int(matches.group(1))
                         self._current_step_in_epoch = int(matches.group(2))
@@ -487,10 +484,9 @@ class TrainingRun(Thread):
                         if self._current_epoch == self._num_epochs - 1 and self._current_step_in_epoch >= self._num_steps_in_epoch:
                             self._has_finished = True
                         if self._current_step_in_epoch % 100 == 0:
-                            print(buffer)
-                    buffer = None
-                elif buffer != None:
-                    buffer += char
+                            print(line)
+                except:
+                    pass
 
         if self._has_finished:
             self._running = False
