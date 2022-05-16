@@ -148,16 +148,27 @@ def run_ordo(root_dir, ordo_exe, concurrency):
     pgn_file_name = os.path.join(root_dir, "out.pgn")
     ordo_file_name = os.path.join(root_dir, "ordo.out")
     ordo_file_name_temp = os.path.join(root_dir, "ordo_temp.out")
-    command = "{} -q -G -J  -p  {} -a 0.0 --anchor=master --draw-auto --white-auto -s 100 --cpus={} -o {}".format(
-        ordo_exe, pgn_file_name, concurrency, ordo_file_name_temp
-    )
+    command = [
+        ordo_exe,
+        '-q',
+        '-g',
+        '-J',
+        '-p', f'{pgn_file_name}',
+        '-a', '0.0',
+        '--anchor=master',
+        '--draw-auto',
+        '--white-auto',
+        '-s', '100',
+        f'--cpus={concurrency}',
+        '-o', f'{ordo_file_name_temp}'
+    ]
 
     print("Running ordo ranking ... {}".format(ordo_file_name), flush=True)
-    ret = os.system(command)
-    if ret != 0:
-        print("Error running ordo!")
-    else:
-        os.replace(ordo_file_name_temp, ordo_file_name)
+    with subprocess.Popen(command) as process:
+        if process.wait():
+            print("Error running ordo!")
+        else:
+            os.replace(ordo_file_name_temp, ordo_file_name)
 
     print("Finished running ordo.")
 
