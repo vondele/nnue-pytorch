@@ -718,7 +718,11 @@ def setup_nnue_pytorch(directory, repo, branch_or_commit):
     print(f'Setting up nnue-pytorch in {directory}')
     git_download_branch_or_commit(directory, repo, branch_or_commit)
 
-    with subprocess.Popen([os.path.join(directory, 'compile_data_loader.bat')], cwd=directory) as process:
+    command = []
+    if sys.platform == "linux":
+        command += ['sh']
+    command += [os.path.join(directory, 'compile_data_loader.bat')]
+    with subprocess.Popen(command, cwd=directory) as process:
         if process.wait():
             raise Exception(f'nnue-pytorch {repo}/{branch_or_commit} data loader compilation failed')
 
