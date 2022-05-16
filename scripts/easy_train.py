@@ -411,6 +411,7 @@ class TrainingRun(Thread):
         self._process = None
         self._running = False
         self._has_exited_unexpectedly = False
+        self._error = None
 
     def _get_stringified_args(self):
         args = [
@@ -487,6 +488,10 @@ class TrainingRun(Thread):
                             print(line)
                 except:
                     pass
+                if 'CUDA_ERROR_OUT_OF_MEMORY' in line or 'CUDA out of memory' in line:
+                    self._process.terminate()
+                    self._error = 'Cuda out of memory error.'
+                    break
 
         if self._has_finished:
             self._running = False
@@ -494,6 +499,8 @@ class TrainingRun(Thread):
         self._has_finished = True
         if self._running:
             print(f'Training run {self._run_id} exited unexpectedly.')
+            if self._error:
+                print(f'Error: {self._error}')
             self._has_exited_unexpectedly = True
         else:
             print(f'Training run {self._run_id} finished.')
@@ -557,6 +564,10 @@ class TrainingRun(Thread):
     @property
     def has_exited_unexpectedly(self):
         return self._has_exited_unexpectedly
+
+    @property
+    def error(self):
+        return self._error
 
 def requests_get_content(url, *args, **kwargs):
     try:
@@ -1086,7 +1097,10 @@ class TrainerRunsWidget(Widget):
     def _make_run_text(self, run):
         if run.has_finished:
             if run.has_exited_unexpectedly:
-                return [f'  Run {run.run_id} - Exited unexpectedly.']
+                lines = [f'  Run {run.run_id} - Exited unexpectedly.']
+                if run.error:
+                    lines += [f'    Error: {run.error}']
+                return lines
             else:
                 loss = run.current_loss
                 return [f'  Run {run.run_id} - Completed; Loss: {loss}']
