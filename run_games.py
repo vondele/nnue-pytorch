@@ -20,12 +20,28 @@ class GameParams:
         if not time_per_move and not time_increment_per_move and not nodes_per_move:
             raise Exception('Invalid TC specification.')
 
-    def get_stringified_tc(self):
+    def get_all_params(self):
+        params = []
+
+        params += ['-each']
+
+        params += [
+            f'option.Hash={self.hash}',
+            f'option.Threads={self.threads}'
+        ]
+
         if self.nodes_per_move:
-            return f'tc=10000+10000 nodes={self.nodes_per_move}'
+            params += [
+                f'tc=10000+10000',
+                f'nodes={self.nodes_per_move}',
+            ]
         else:
             inc = self.time_increment_per_move or 0
-            return f'tc={self.time_per_move}+{inc}'
+            params += [f'tc={self.time_per_move}+{inc}']
+
+        params += ['-games', f'{self.games_per_round}']
+
+        return params
 
 
 def convert_ckpt(root_dir,features):
@@ -86,29 +102,29 @@ def parse_ordo(root_dir, nnues):
 def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfish_base, stockfish_test, game_params):
     """ Run a match using c-chess-cli adding pgns to a file to be analysed with ordo """
     pgn_file_name = os.path.join(root_dir, "out_temp.pgn")
-    command = f"{c_chess_exe} -each " + game_params.get_stringified_tc() + f" option.Hash={game_params.hash} option.Threads={game_params.threads} -gauntlet -games {game_params.games_per_round} -rounds 1 -concurrency {concurrency}"
-    command = (
-        command
-        + " -openings file={} order=random -repeat -resign count=3 score=700 -draw count=8 score=10".format(
-            book_file_name
-        )
-    )
-    command = command + " -engine cmd={} name=master".format(stockfish_base)
+    command = []
+    if sys.platform != "win32":
+        command += ['stdbuf -o0']
+    command += [
+        c_chess_exe,
+        '-gauntlet', '-rounds', '1',
+        '-concurrency', f'{concurrency}'
+    ]
+    command += game_params.get_all_params()
+    command += [
+        '-openings', f'file={book_file_name}', 'order=random', '-repeat',
+        '-resign', 'count=3', 'score=700',
+        '-draw', 'count=8', 'score=10',
+        '-pgn', f'{pgn_file_name}', '0'
+    ]
+    command += ['-engine', f'cmd={stockfish_base}', 'name=master']
     for net in best:
-        command = command + " -engine cmd={} name={} option.EvalFile={}".format(
-            stockfish_test, net, os.path.join(os.getcwd(), net)
-        )
-    command = command + " -pgn {} 0".format(
-        pgn_file_name
-    )
+        evalfile = os.path.join(os.getcwd(), net)
+        command += ['-engine', f'cmd={stockfish_test}', f'name={net}', f'option.EvalFile={evalfile}']
 
     print("Running match with c-chess-cli ... {}".format(pgn_file_name), flush=True)
     c_chess_out = open(os.path.join(root_dir, "c_chess.out"), 'w')
-    if sys.platform == "win32":
-        # sadly the lack of stdbuf is an issue on windows, but it still gets updated at some point at least...
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    else:
-        process = subprocess.Popen("stdbuf -o0 " + command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     seen = {}
     for line in process.stdout:
         line = line.decode('utf-8')
