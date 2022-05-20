@@ -350,12 +350,36 @@ class SystemResourcesMonitor(Thread):
         self._running = False
         self._stop_event.set()
 
-def find_latest_checkpoint_in_run(root_dir):
+def find_latest_checkpoint(root_dir):
     ckpts = [file for file in Path(root_dir).rglob("*.ckpt")]
     if not ckpts:
         return None
 
     return str(max(ckpts, key=lambda p: p.stat().st_ctime_ns))
+
+def find_best_checkpoint(root_dir):
+    ckpts = [str(file) for file in Path(root_dir).rglob("*.ckpt")]
+    nnues = [str(file) for file in Path(root_dir).rglob("*.nnue")]
+    ordo_file_path = os.path.join(root_dir, 'ordo.out')
+
+    with open(ordo_file_path, 'r') as ordo_file:
+        for line in ordo_file:
+            if 'nn-epoch' in line:
+                # get first found
+                net_parts = OrdoEntry.NET_PATTERN.search(line)
+                run_id = int(net_parts[1])
+                epoch = int(net_parts[2])
+                for ckpt in ckpts:
+                    if f'run_{run_id}' in ckpt and f'epoch={epoch}' in ckpt:
+                        return ckpt
+                # fallback to .nnue if no checkpoint file
+                for nnue in nnues:
+                    if f'run_{run_id}' in nnue and f'nn-epoch{epoch}' in nnue:
+                        return nnue
+
+                break
+
+    return None
 
 RESOURCE_MONITOR = SystemResourcesMonitor(2)
 NUMERIC_CONST_PATTERN = '[-+]?(?:(?:\d*\.\d+)|(?:\d+\.?))(?:[Ee][+-]?\d+)?'
@@ -464,7 +488,7 @@ class TrainingRun(Thread):
 
         resumed = False
         if self._resume_training:
-            ckpt_path = find_latest_checkpoint_in_run(self._root_dir)
+            ckpt_path = find_latest_checkpoint(self._root_dir)
             if ckpt_path:
                 args.append(f'--resume_from_checkpoint={ckpt_path}')
                 resumed = True
@@ -1425,6 +1449,7 @@ def parse_cli_args():
     parser.add_argument("--wld-fen-skipping", default=True, type=str2bool, dest='wld_fen_skipping', help="If used then no wld fen skipping will be done. By default wld fen skipping is done.")
     parser.add_argument("--random-fen-skipping", default=3, type=int, dest='random_fen_skipping', help="skip fens randomly on average random_fen_skipping before using one.")
     parser.add_argument("--start-from-model", default=None, type=str, dest='start_from_model', help="Initializes training using the weights from the given .pt model")
+    parser.add_argument("--start-from-experiment", default=None, type=str, dest='start_from_experiment', help="Initializes training using the best network from a given experiment (by name). Uses best net from ordo, fallbacks to last.")
     parser.add_argument("--gpus", type=str, dest='gpus', default='0')
     parser.add_argument("--runs-per-gpu", type=int, dest='runs_per_gpu', default=1)
     parser.add_argument("--features", type=str, help="The feature set to use")
@@ -1471,8 +1496,11 @@ def parse_cli_args():
     if not args.network_testing_time_per_move and not args.network_testing_nodes_per_move:
         raise Exception('No time control specified.')
 
-    if args.start_from_model and args.resume_training:
-        raise Exception('Only one of --start-from-model and --resume-training can be specified at a time.')
+    if [args.start_from_model, args.resume_training, args.start_from_experiment].count(True) > 1:
+        raise Exception('Only one of --start-from-model, --resume-training, and --start-from-experiment can be specified at a time.')
+
+    if args.start_from_experiment and not args.start_from_experiment.startswith('experiment_'):
+        args.start_from_experiment = 'experiment_' + args.start_from_experiment
 
     return args
 
@@ -1536,6 +1564,8 @@ def setup_book(directory, args):
 def prepare_start_model(directory, model_path, run_id, nnue_pytorch_directory, features):
     os.makedirs(directory, exist_ok=True)
 
+    LOGGER.info(f'Starting from model: {model_path}')
+
     destination_filename = 'start_model'
     if run_id:
         destination_filename +=  'run_' + str(run_id)
@@ -1568,6 +1598,15 @@ def prepare_start_model(directory, model_path, run_id, nnue_pytorch_directory, f
             raise Exception('Failed to convert start model.')
 
     return destination_model_path
+
+def prepare_start_model_from_experiment(directory, experiment_path, run_id, nnue_pytorch_directory, features):
+    root_dir = os.path.join(experiment_path, 'training')
+    best_model = find_best_checkpoint(root_dir)
+    if best_model is None:
+        best_model = find_latest_checkpoint(root_dir)
+    if best_model is None:
+        raise Exception('Could not find any viable .ckpt nor .nnue files in the start experiment.')
+    return prepare_start_model(directory, best_model, run_id, nnue_pytorch_directory, features)
 
 def main():
     LOGGER.info('Initializing...')
@@ -1630,22 +1669,31 @@ def main():
     #     tmp/experiments/experiment_{name}/bookkeeping
     #     tmp/c-chess-cli
     #     tmp/ordo
+
+    start_model = None
+    if args.start_from_model:
+        start_model = prepare_start_model(
+            directory=start_model_directory,
+            model_path=args.start_from_model,
+            run_id=None,
+            nnue_pytorch_directory=nnue_pytorch_directory,
+            features=args.features
+        )
+    elif args.start_from_experiment:
+        start_model = prepare_start_model_from_experiment(
+            directory=start_model_directory,
+            experiment_path=os.path.join(absolute_workspace_path, 'experiments', args.start_from_experiment),
+            run_id=None,
+            nnue_pytorch_directory=nnue_pytorch_directory,
+            features=args.features
+        )
+
     training_runs = []
     if do_network_training:
         gpu_ids = [int(v) for v in args.gpus.split(',') if v]
         for gpu_id in gpu_ids:
             for j in range(args.runs_per_gpu):
                 run_id = gpu_id*args.runs_per_gpu+j
-
-                start_model = None
-                if args.start_from_model:
-                    start_model = prepare_start_model(
-                        directory=start_model_directory,
-                        model_path=args.start_from_model,
-                        run_id=None,
-                        nnue_pytorch_directory=nnue_pytorch_directory,
-                        features=args.features
-                    )
 
                 training_runs.append(TrainingRun(
                     gpu_id=gpu_id,
