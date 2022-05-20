@@ -234,6 +234,7 @@ import io
 import os
 import requests
 import zipfile
+import shutil
 import urllib.request
 import urllib.parse
 from tqdm.auto import tqdm
@@ -469,7 +470,7 @@ class TrainingRun(Thread):
                 resumed = True
 
         if self._start_from_model and not resumed:
-            args.append(f'--resume-from-model={args._start_from_model}')
+            args.append(f'--resume-from-model={self._start_from_model}')
 
         for arg in self._additional_args:
             args.append(arg)
@@ -1470,6 +1471,9 @@ def parse_cli_args():
     if not args.network_testing_time_per_move and not args.network_testing_nodes_per_move:
         raise Exception('No time control specified.')
 
+    if args.start_from_model and args.resume_training:
+        raise Exception('Only one of --start-from-model and --resume-training can be specified at a time.')
+
     return args
 
 def do_bookkeeping(directory, args):
@@ -1529,6 +1533,42 @@ def setup_book(directory, args):
 
     LOGGER.info('Book setup completed.')
 
+def prepare_start_model(directory, model_path, run_id, nnue_pytorch_directory, features):
+    os.makedirs(directory, exist_ok=True)
+
+    destination_filename = 'start_model'
+    if run_id:
+        destination_filename +=  'run_' + str(run_id)
+    destination_filename += '.pt'
+
+    destination_model_path = os.path.join(directory, destination_filename)
+
+    if model_path.endswith('.pt'):
+        shutil.copyfile(model_path, destination_model_path)
+    elif model_path.endswith('.nnue') or model_path.endswith('.ckpt'):
+        if model_path.endswith('.nnue') and features.endswith('^'):
+            features = features[:-1]
+
+        with subprocess.Popen(
+            [
+                sys.executable,
+                'serialize.py',
+                os.path.abspath(model_path),
+                destination_model_path,
+                f'--features={features}',
+            ],
+            cwd=nnue_pytorch_directory,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT
+        ) as process:
+            if process.wait():
+                raise Exception('Failed to run serialize.py for start model.')
+
+        if not os.path.exists(destination_model_path):
+            raise Exception('Failed to convert start model.')
+
+    return destination_model_path
+
 def main():
     LOGGER.info('Initializing...')
 
@@ -1551,6 +1591,7 @@ def main():
     stockfish_test_directory = os.path.join(experiment_directory, 'stockfish_test')
     nnue_pytorch_directory = os.path.join(experiment_directory, 'nnue-pytorch')
     bookkeeping_directory = os.path.join(experiment_directory, 'bookkeeping')
+    start_model_directory = os.path.join(experiment_directory, 'start_models')
 
     do_bookkeeping(bookkeeping_directory, args)
 
@@ -1595,6 +1636,17 @@ def main():
         for gpu_id in gpu_ids:
             for j in range(args.runs_per_gpu):
                 run_id = gpu_id*args.runs_per_gpu+j
+
+                start_model = None
+                if args.start_from_model:
+                    start_model = prepare_start_model(
+                        directory=start_model_directory,
+                        model_path=args.start_from_model,
+                        run_id=None,
+                        nnue_pytorch_directory=nnue_pytorch_directory,
+                        features=args.features
+                    )
+
                 training_runs.append(TrainingRun(
                     gpu_id=gpu_id,
                     run_id=run_id,
@@ -1614,7 +1666,7 @@ def main():
                     network_save_period=args.network_save_period,
                     save_last_network=args.save_last_network,
                     seed=args.seed,
-                    start_from_model=args.start_from_model,
+                    start_from_model=start_model,
                     root_dir=os.path.join(experiment_directory, 'training', f'run_{run_id}'),
                     epoch_size=args.epoch_size,
                     validation_size=args.validation_size,
