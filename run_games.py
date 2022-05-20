@@ -94,7 +94,7 @@ def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfis
     pgn_file_name = os.path.join(root_dir, "out_temp.pgn")
     command = []
     if sys.platform != "win32":
-        command += ['stdbuf -o0']
+        command += ['stdbuf', '-o0']
     command += [
         c_chess_exe,
         '-gauntlet', '-rounds', '1',
