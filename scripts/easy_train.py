@@ -15,7 +15,6 @@ import logging
 logging.basicConfig()
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.DEBUG)
-LOGGER.propagate = False
 
 def validate_python_version():
     if sys.version_info >= (3, 7):
@@ -218,6 +217,8 @@ def validate_environment_requirements():
 
 if not validate_environment_requirements():
     sys.exit(2)
+
+LOGGER.propagate = False
 
 from asciimatics.widgets import Frame, ListBox, Layout, Divider, Text, Button, \
     TextBox, Widget, VerticalDivider, MultiColumnListBox, Label, PopUpDialog
