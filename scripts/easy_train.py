@@ -1182,7 +1182,7 @@ class TrainerRunsWidget(Widget):
             gpu_compute_pct = gpu_usage[gpu_id]['compute_pct']
             gpu_memory_mb = gpu_usage[gpu_id]['memory_mb']
             gpu_max_memory_mb = gpu_usage[gpu_id]['max_memory_mb']
-            return f'GPU {gpu_id} - {gpu_compute_pct}% {gpu_memory_mb}MB/{gpu_max_memory_mb}MB '
+            return f'GPU {gpu_id} - Usage: {gpu_compute_pct}% {gpu_memory_mb}MB/{gpu_max_memory_mb}MB '
         else:
             return f'GPU {gpu_id}'
 
