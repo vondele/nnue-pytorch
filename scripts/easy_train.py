@@ -1461,11 +1461,12 @@ def main():
 
     ordo_directory = os.path.join(absolute_workspace_path, 'ordo')
     c_chess_cli_directory = os.path.join(absolute_workspace_path, 'c-chess-cli')
+    books_directory = os.path.join(absolute_workspace_path, 'books')
+
     stockfish_base_directory = os.path.join(experiment_directory, 'stockfish_base')
     stockfish_test_directory = os.path.join(experiment_directory, 'stockfish_test')
     nnue_pytorch_directory = os.path.join(experiment_directory, 'nnue-pytorch')
     bookkeeping_directory = os.path.join(experiment_directory, 'bookkeeping')
-    books_directory = os.path.join(experiment_directory, 'books')
 
     do_bookkeeping(bookkeeping_directory, args)
 
