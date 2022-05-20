@@ -430,6 +430,9 @@ class TrainingRun(Thread):
         self._has_exited_unexpectedly = False
         self._error = None
 
+        self._last_time = None
+        self._last_step = None
+
     def _get_stringified_args(self):
         args = [
             self._training_dataset,
@@ -502,8 +505,26 @@ class TrainingRun(Thread):
                         self._current_epoch = int(matches.group(1))
                         self._current_step_in_epoch = int(matches.group(2))
                         self._num_steps_in_epoch = int(matches.group(3))
-                        self._momentary_iterations_per_second = float(matches.group(4))
+
+                        # There appears to be a pytorch lightning bug where it displays
+                        # negative speed when running from checkpoint. So we work around this
+                        # by computing our own speed.
+                        curr_step = self._current_epoch * self._num_steps_in_epoch + self._current_step_in_epoch
+                        if curr_step == self._last_step:
+                            continue
+
+                        curr_time = time.perf_counter_ns()
+                        if self._last_time is None:
+                            self._last_time = curr_time
+                            self._last_step = curr_step
+                            continue
+
+                        #self._momentary_iterations_per_second = float(matches.group(4))
+                        self._momentary_iterations_per_second = (curr_step-self._last_step)/((curr_time-self._last_time)/1e9)
                         self._smooth_iterations_per_second.update(self._momentary_iterations_per_second)
+                        self._last_time = curr_time
+                        self._last_step = curr_step
+
                         self._current_loss = float(matches.group(5))
                         self._has_started = True
                         if self._current_epoch == self._num_epochs - 1 and self._current_step_in_epoch >= self._num_steps_in_epoch:
@@ -1131,25 +1152,30 @@ class TrainerRunsWidget(Widget):
         elif not run.has_started:
             return f'  Run {run.run_id} - Starting...',
         else:
-            width = self._w - self._offset
-            loss = run.current_loss
-            epoch = run.current_epoch
-            max_epoch = run.num_epochs - 1
-            step_in_epoch = run.current_step_in_epoch
-            max_step = run.num_steps_in_epoch - 1
-            speed = run.smooth_iterations_per_second
+            try:
+                width = self._w - self._offset
+                loss = run.current_loss
+                epoch = run.current_epoch
+                max_epoch = run.num_epochs - 1
+                step_in_epoch = run.current_step_in_epoch
+                max_step = run.num_steps_in_epoch - 1
+                speed = run.smooth_iterations_per_second
 
-            total_steps = run.num_epochs * run.num_steps_in_epoch
-            step = epoch * run.num_steps_in_epoch + step_in_epoch
-            complete_pct = step / total_steps * 100
-            eta_seconds = (total_steps - step) / speed
-            eta_str = duration_string_from_seconds_compact(eta_seconds)
+                total_steps = run.num_epochs * run.num_steps_in_epoch
+                step = epoch * run.num_steps_in_epoch + step_in_epoch
+                complete_pct = step / total_steps * 100
+                eta_seconds = (total_steps - step) / speed
+                eta_str = duration_string_from_seconds_compact(eta_seconds)
 
-            return [
-                f'  Run {run.run_id} - {complete_pct:0.2f}% ({speed:0.1f}it/s) [ETA {eta_str}]',
-                f'    Epoch: {epoch}/{max_epoch}; Step: {step_in_epoch}/{max_step}',
-                f'    Loss: {loss}',
-            ]
+                return [
+                    f'  Run {run.run_id} - {complete_pct:0.2f}% ({speed:0.1f}it/s) [ETA {eta_str}]',
+                    f'    Epoch: {epoch}/{max_epoch}; Step: {step_in_epoch}/{max_step}',
+                    f'    Loss: {loss}',
+                ]
+            except:
+                return [
+                    f'  Run {run.run_id} - Waiting for enough data to display...'
+                ]
 
     def _make_gpu_text(self, gpu_id, gpu_usage):
         if gpu_id in gpu_usage:
