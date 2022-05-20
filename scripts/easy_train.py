@@ -237,6 +237,7 @@ import zipfile
 import urllib.request
 import urllib.parse
 from tqdm.auto import tqdm
+from pathlib import Path
 
 ORDO_GIT = ('michiguel/Ordo', '17eec774f2e4b9fdd2b1b38739f55ea221fb851a')
 C_CHESS_CLI_GIT = ('lucasart/c-chess-cli', '6d08fee2e95b259c486b21a886f6911b61f676af')
@@ -348,6 +349,13 @@ class SystemResourcesMonitor(Thread):
         self._running = False
         self._stop_event.set()
 
+def find_latest_checkpoint_in_run(root_dir):
+    ckpts = [file for file in Path(root_dir).rglob("*.ckpt")]
+    if not ckpts:
+        return None
+
+    return str(max(ckpts, key=lambda p: p.stat().st_ctime_ns))
+
 global_resource_monitor = SystemResourcesMonitor(2)
 numeric_const_pattern = '[-+]?(?:(?:\d*\.\d+)|(?:\d+\.?))(?:[Ee][+-]?\d+)?'
 
@@ -377,6 +385,7 @@ class TrainingRun(Thread):
         epoch_size,
         validation_size,
         resume_from_model=None,
+        resume_training=False,
         additional_args=[]
     ):
 
@@ -404,6 +413,7 @@ class TrainingRun(Thread):
         self._epoch_size = epoch_size
         self._validation_size = validation_size
         self._resume_from_model = resume_from_model
+        self._resume_training = resume_training
         self._additional_args = additional_args
 
         self._current_step_in_epoch = None
@@ -449,7 +459,14 @@ class TrainingRun(Thread):
         if not self._wld_fen_skipping:
             args.append('--no-wld-fen-skipping')
 
-        if self._resume_from_model:
+        resumed = False
+        if self._resume_training:
+            ckpt_path = find_latest_checkpoint_in_run(self._root_dir)
+            if ckpt_path:
+                args.append(f'--resume_from_checkpoint={ckpt_path}')
+                resumed = True
+
+        if self._resume_from_model and not resumed:
             args.append(f'--resume-from-model={args._resume_from_model}')
 
         for arg in self._additional_args:
@@ -1379,6 +1396,7 @@ def parse_cli_args():
     parser.add_argument("--network-testing-nodes-per-move", type=int, default=None, dest='network_testing_nodes_per_move', help="Number of nodes per move to use for testing. Overrides time control. Should be used ove time control for better consistency.")
     parser.add_argument("--network-testing-hash-mb", type=int, default=8, dest='network_testing_hash_mb', help="Number of MB of memory to use for hash allocation for each engine being tested.")
     parser.add_argument("--network-testing-games-per-round", type=int, default=200, dest='network_testing_games_per_round', help="Number of games per round to use. Essentially a testing batch size.")
+    parser.add_argument("--resume-training", type=str2bool, default=False, dest='resume_training', help="Attempts to resume each run from its latest checkpoint.")
     args = parser.parse_args()
 
     args.validation_dataset = args.validation_dataset or args.training_dataset
@@ -1548,6 +1566,7 @@ def main():
                     root_dir=os.path.join(experiment_directory, 'training', f'run_{run_id}'),
                     epoch_size=args.epoch_size,
                     validation_size=args.validation_size,
+                    resume_training=args.resume_training,
                     additional_args=[arg for arg in args.additional_training_args or []]
                 ))
         LOGGER.info(f'Doing network training on gpus {gpu_ids}. {len(training_runs)} runs in total.')

@@ -28,4 +28,5 @@ python easy_train.py ^
     --nnue-pytorch=Sopel97/nnue-pytorch/easy_train ^
     --workspace-path=./easy_train_data ^
     --experiment-name=test ^
+    --resume-training=True ^
     --features="HalfKAv2_hm%^" ^
