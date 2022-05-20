@@ -921,7 +921,9 @@ class NetworkTesting(Thread):
         self._process = None
         self._current_test = None
         self._current_convert = None
-        self._has_exited_unexpectedly = False
+        self._error = None
+        self._has_finished = False # currently never finishes
+        self._has_started = False
 
     def _get_stringified_args(self):
         args = [
@@ -956,8 +958,15 @@ class NetworkTesting(Thread):
         cpu_usage = RESOURCE_MONITOR.resources.cpu_usage
         if not self._active:
             return 'Network testing inactive.'
-        elif self._has_exited_unexpectedly:
-            return 'Network testing has exited unexpectedly.'
+        elif self._has_finished:
+            return 'Network testing finished.'
+        elif not self._has_started:
+            return 'Starting testing process...'
+        elif not self._running:
+            lines = ['Network testing has exited unexpectedly.']
+            if self._error:
+                lines.append(f'Error: {self._error}')
+            return '\n'.join(lines)
         elif self._current_convert is not None:
             lines = [
                 f'Converting network...',
@@ -1021,20 +1030,26 @@ class NetworkTesting(Thread):
                     except:
                         self._current_convert = None
                 elif line.startswith('Error running match!'):
-                    LOGGER.error('Error running matches. Exiting.')
+                    self._process.terminate()
+                    self._error = 'Error running matches.'
                     break
                 else:
                     self._current_test = None
+
+                self._has_started = True
         except:
             self._process.terminate()
             self._process.wait()
 
-        if self._running:
+        if self._running and not self._has_finished:
             LOGGER.warning('Network testing exited unexpectedly.')
-            self._has_exited_unexpectedly = True
-        else:
-            LOGGER.info('Network testing finished.')
+            if not self._error:
+                self._error = 'Unknown error occured.'
+            LOGGER.error(f'Error: {self._error}')
 
+        LOGGER.info('Network testing finished.')
+
+        self._has_started = True
         self._running = False
 
     def stop(self):
@@ -1067,8 +1082,12 @@ class NetworkTesting(Thread):
         return list(sorted(self._results, key=lambda x: -x.elo))
 
     @property
-    def has_exited_unexpectedly(self):
-        return self._has_exited_unexpectedly
+    def has_finished(self):
+        return self._has_finished
+
+    @property
+    def is_running(self):
+        return self._running
 
     @property
     def is_active(self):
