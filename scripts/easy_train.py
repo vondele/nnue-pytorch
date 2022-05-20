@@ -15,6 +15,8 @@ import logging
 logging.basicConfig()
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.DEBUG)
+LOGGER.addHandler(logging.StreamHandler(stream=sys.stdout))
+LOGGER.propagate = False
 
 def validate_python_version():
     if sys.version_info >= (3, 7):
@@ -217,8 +219,6 @@ def validate_environment_requirements():
 
 if not validate_environment_requirements():
     sys.exit(2)
-
-LOGGER.propagate = False
 
 from asciimatics.widgets import Frame, ListBox, Layout, Divider, Text, Button, \
     TextBox, Widget, VerticalDivider, MultiColumnListBox, Label, PopUpDialog
@@ -1506,9 +1506,6 @@ def main():
 
     args = parse_cli_args()
 
-    if not args.tui:
-        LOGGER.addHandler(logging.StreamHandler(stream=sys.stdout))
-
     absolute_workspace_path = os.path.abspath(args.workspace_path)
     experiment_directory = os.path.join(absolute_workspace_path, f'experiments/experiment_{args.experiment_name}')
     try:
@@ -1626,6 +1623,9 @@ def main():
     network_testing.start()
 
     if args.tui:
+        for h in LOGGER.handlers:
+            if isinstance(h, logging.StreamHandler):
+                LOGGER.removeHandler(h)
         last_scene = None
         while True:
             try:
