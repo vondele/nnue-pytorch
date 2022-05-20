@@ -10,13 +10,19 @@ import importlib
 import importlib.metadata
 import argparse
 import math
+import logging
+
+logging.basicConfig()
+LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.DEBUG)
+LOGGER.propagate = False
 
 def validate_python_version():
     if sys.version_info >= (3, 7):
-        print(f'Found python version {sys.version}. OK.')
+        LOGGER.info(f'Found python version {sys.version}. OK.')
         return True
     else:
-        print(f'Found python version {sys.version} but 3.7 is required. Exiting.')
+        LOGGER.error(f'Found python version {sys.version} but 3.7 is required. Exiting.')
         return False
 
 def run_for_version(name):
@@ -41,12 +47,12 @@ def validate_git():
         major_version = int(version_str.split('.')[0])
         success = major_version >= 2
         if success:
-            print(f'Found git executable version {version_str}. OK.')
+            LOGGER.info(f'Found git executable version {version_str}. OK.')
         else:
-            print(f'Found git executable version {version_str} but at least 2.0 required. Exiting.')
+            LOGGER.error(f'Found git executable version {version_str} but at least 2.0 required. Exiting.')
     except:
         success = False
-        print('No git executable found. Exiting.')
+        LOGGER.error('No git executable found. Exiting.')
 
     return success
 
@@ -60,12 +66,12 @@ def validate_cmake():
         minor_version = int(version_str.split('.')[1])
         success = (major_version, minor_version) >= (3, 4)
         if success:
-            print(f'Found cmake executable version {version_str}. OK.')
+            LOGGER.info(f'Found cmake executable version {version_str}. OK.')
         else:
-            print(f'Found cmake executable version {version_str} but at least 3.4 required. Exiting.')
+            LOGGER.error(f'Found cmake executable version {version_str} but at least 3.4 required. Exiting.')
     except:
         success = False
-        print('No cmake executable found. Exiting.')
+        LOGGER.error('No cmake executable found. Exiting.')
 
     return success
 
@@ -78,12 +84,12 @@ def validate_make():
         major_version = int(version_str.split('.')[0])
         success = major_version >= 3
         if success:
-            print(f'Found make executable version {version_str}. OK.')
+            LOGGER.info(f'Found make executable version {version_str}. OK.')
         else:
-            print(f'Found make executable version {version_str} but at least 3 required. Exiting.')
+            LOGGER.error(f'Found make executable version {version_str} but at least 3 required. Exiting.')
     except:
         success = False
-        print('No make executable found. Exiting.')
+        LOGGER.error('No make executable found. Exiting.')
 
     return success
 
@@ -97,12 +103,12 @@ def validate_gcc():
         minor_version = int(version_str.split('.')[1])
         success = (major_version, minor_version) >= (9, 2)
         if success:
-            print(f'Found gcc executable version {version_str}. OK.')
+            LOGGER.info(f'Found gcc executable version {version_str}. OK.')
         else:
-            print(f'Found gcc executable version {version_str} but at least 9.2 required. Exiting.')
+            LOGGER.error(f'Found gcc executable version {version_str} but at least 9.2 required. Exiting.')
     except:
         success = False
-        print('No gcc executable found. Exiting.')
+        LOGGER.error('No gcc executable found. Exiting.')
 
     return success
 
@@ -138,53 +144,53 @@ class PackageInfo:
 def validate_asciimatics():
     pkg = PackageInfo('asciimatics')
     if pkg.exists:
-        print('Found asciimatics package. OK.')
+        LOGGER.info('Found asciimatics package. OK.')
         return True
     else:
-        print('No asciimatics package found. Run `pip install asciimatics`. Exiting.')
+        LOGGER.error('No asciimatics package found. Run `pip install asciimatics`. Exiting.')
         return False
 
 def validate_pytorch():
     pkg = PackageInfo('torch')
     if pkg.exists:
         if not 'cu' in pkg.version:
-            print(f'Found torch without CUDA but CUDA support required. Exiting')
+            LOGGER.error(f'Found torch without CUDA but CUDA support required. Exiting')
             return False
         elif pkg.is_version_at_least((1, 8)):
-            print(f'Found torch version {pkg.version}. OK.')
+            LOGGER.info(f'Found torch version {pkg.version}. OK.')
             return True
         else:
-            print(f'Found torch version {pkg.version} but at least 1.8 required. Exiting.')
+            LOGGER.error(f'Found torch version {pkg.version} but at least 1.8 required. Exiting.')
             return False
     else:
-        print('No torch package found. Install at least torch 1.8 with cuda. See https://pytorch.org/. Exiting.')
+        LOGGER.error('No torch package found. Install at least torch 1.8 with cuda. See https://pytorch.org/. Exiting.')
         return False
 
 def validate_pytorchlightning():
     pkg = PackageInfo('pytorch_lightning')
     if pkg.exists:
-        print(f'Found pytorch_lightning version {pkg.version}. OK.')
+        LOGGER.info(f'Found pytorch_lightning version {pkg.version}. OK.')
         return True
     else:
-        print('No pytorch_lightning found. Run `pip install pytorch-lightning`. Exiting.')
+        LOGGER.error('No pytorch_lightning found. Run `pip install pytorch-lightning`. Exiting.')
         return False
 
 def validate_cupy():
     pkg = PackageInfo('cupy')
     if pkg.exists:
-        print(f'Found cupy version {pkg.version}. OK.')
+        LOGGER.info(f'Found cupy version {pkg.version}. OK.')
         return True
     else:
-        print('No cupy found. Install cupy matching cuda version used by pytorch. See https://cupy.dev/. Exiting.')
+        LOGGER.error('No cupy found. Install cupy matching cuda version used by pytorch. See https://cupy.dev/. Exiting.')
         return False
 
 def validate_gputil():
     pkg = PackageInfo('GPUtil')
     if pkg.exists:
-        print(f'Found GPUtil version {pkg.version}. OK.')
+        LOGGER.info(f'Found GPUtil version {pkg.version}. OK.')
         return True
     else:
-        print('No GPUtil found. Run `pip install GPUtil`. Exiting.')
+        LOGGER.error('No GPUtil found. Run `pip install GPUtil`. Exiting.')
         return False
 
 def validate_imports():
@@ -206,7 +212,7 @@ def validate_environment_requirements():
         success &= validate_gcc()
         success &= validate_imports()
     except Exception as e:
-        print(e)
+        LOGGER.error(e)
         return False
     return success
 
@@ -454,7 +460,7 @@ class TrainingRun(Thread):
         self._running = True
 
         cmd = [sys.executable, 'train.py'] + self._get_stringified_args()
-        print(f'Running training with command: {cmd}')
+        LOGGER.info(f'Running training with command: {cmd}')
         self._process = subprocess.Popen(
             cmd,
             cwd=self._nnue_pytorch_directory,
@@ -485,7 +491,7 @@ class TrainingRun(Thread):
                         if self._current_epoch == self._num_epochs - 1 and self._current_step_in_epoch >= self._num_steps_in_epoch:
                             self._has_finished = True
                         if self._current_step_in_epoch % 100 == 0:
-                            print(line)
+                            LOGGER.info(line)
                 except:
                     pass
                 if 'CUDA_ERROR_OUT_OF_MEMORY' in line or 'CUDA out of memory' in line:
@@ -498,12 +504,12 @@ class TrainingRun(Thread):
 
         self._has_finished = True
         if self._running:
-            print(f'Training run {self._run_id} exited unexpectedly.')
+            LOGGER.warning(f'Training run {self._run_id} exited unexpectedly.')
             if self._error:
-                print(f'Error: {self._error}')
+                LOGGER.error(f'Error: {self._error}')
             self._has_exited_unexpectedly = True
         else:
-            print(f'Training run {self._run_id} finished.')
+            LOGGER.info(f'Training run {self._run_id} finished.')
 
         self._running = False
 
@@ -613,10 +619,10 @@ def is_ordo_setup(directory):
 
 def setup_ordo(directory):
     if is_ordo_setup(directory):
-        print(f'Ordo already setup in {directory}')
+        LOGGER.info(f'Ordo already setup in {directory}')
         return
 
-    print(f'Setting up ordo in {directory}.')
+    LOGGER.info(f'Setting up ordo in {directory}.')
     git_download_branch_or_commit(directory, *ORDO_GIT)
     if sys.platform == "win32":
         # need to append -DMINGW
@@ -656,10 +662,10 @@ def is_c_chess_cli_setup(directory):
 
 def setup_c_chess_cli(directory):
     if is_c_chess_cli_setup(directory):
-        print(f'c-chess-cli already setup in {directory}')
+        LOGGER.info(f'c-chess-cli already setup in {directory}')
         return
 
-    print(f'Setting up c-chess-cli in {directory}.')
+    LOGGER.info(f'Setting up c-chess-cli in {directory}.')
     git_download_branch_or_commit(directory, *C_CHESS_CLI_GIT)
     with subprocess.Popen([sys.executable, 'make.py'], cwd=directory) as process:
         if process.wait():
@@ -686,10 +692,10 @@ def is_stockfish_setup(directory):
 
 def setup_stockfish(directory, repo, branch_or_commit, arch, threads=1):
     if is_stockfish_setup(directory):
-        print(f'Stockfish already setup in {directory}.')
+        LOGGER.info(f'Stockfish already setup in {directory}.')
         return
 
-    print(f'Setting up stockfish in {directory}.')
+    LOGGER.info(f'Setting up stockfish in {directory}.')
     git_download_branch_or_commit(directory, repo, branch_or_commit)
 
     srcdir = os.path.join(directory, 'src')
@@ -719,10 +725,10 @@ def is_nnue_pytorch_setup(directory):
 
 def setup_nnue_pytorch(directory, repo, branch_or_commit):
     if is_nnue_pytorch_setup(directory):
-        print(f'nnue-pytorch already setup in {directory}')
+        LOGGER.info(f'nnue-pytorch already setup in {directory}')
         return
 
-    print(f'Setting up nnue-pytorch in {directory}')
+    LOGGER.info(f'Setting up nnue-pytorch in {directory}')
     git_download_branch_or_commit(directory, repo, branch_or_commit)
 
     command = []
@@ -936,7 +942,7 @@ class NetworkTesting(Thread):
         self._running = True
 
         cmd = [sys.executable, 'run_games.py'] + self._get_stringified_args()
-        print(f'Running network testing with command: {cmd}')
+        LOGGER.info(f'Running network testing with command: {cmd}')
         self._process = subprocess.Popen(
             cmd,
             cwd=self._nnue_pytorch_directory,
@@ -959,7 +965,7 @@ class NetworkTesting(Thread):
                     try:
                         self._current_test = CChessCliRunningTestEntry(line=line)
                         if self._current_test.total_games % 100 == 0:
-                            print(self.get_status_string())
+                            LOGGER.info(self.get_status_string())
                         self._current_convert = None
                     except:
                         self._current_test = None
@@ -968,11 +974,11 @@ class NetworkTesting(Thread):
                     try:
                         self._current_convert = (fields[1], fields[2])
                         self._current_test = None
-                        print(self.get_status_string())
+                        LOGGER.info(self.get_status_string())
                     except:
                         self._current_convert = None
                 elif line.startswith('Error running match!'):
-                    print('Error running matches. Exiting.')
+                    LOGGER.error('Error running matches. Exiting.')
                     break
                 else:
                     self._current_test = None
@@ -981,10 +987,10 @@ class NetworkTesting(Thread):
             self._process.wait()
 
         if self._running:
-            print('Network testing exited unexpectedly.')
+            LOGGER.warning('Network testing exited unexpectedly.')
             self._has_exited_unexpectedly = True
         else:
-            print('Network testing finished.')
+            LOGGER.info('Network testing finished.')
 
         self._running = False
 
@@ -1003,7 +1009,7 @@ class NetworkTesting(Thread):
         try:
             with open(ordo_file_path, 'r') as ordo_file:
                 lines = ordo_file.readlines()
-                print(lines[:5])
+                LOGGER.info(lines[:5])
                 for line in lines:
                     try:
                         entry = OrdoEntry(line=line)
@@ -1399,6 +1405,10 @@ def do_bookkeeping(directory, args):
     with open(args_dump_file_path, 'w') as file:
         file.write(repr(args))
 
+    logs_file_path = os.path.join(directory, 'easy_train.log')
+
+    LOGGER.addHandler(logging.FileHandler(logs_file_path, encoding='utf-8'))
+
 def is_url(path):
     return path.startswith('http://') or path.startswith('https://') or path.startswith('ftp://') or path.startswith('sftp://')
 
@@ -1422,7 +1432,7 @@ def setup_book(directory, args):
         filename = temp_filename
 
     if not filename.endswith('.epd'):
-        print('Cannot handle to book. Currently only .epd books are supported. If compressed with .zip the name must be a.epd.zip. No other compression format is supported right now.')
+        LOGGER.error('Cannot handle the book. Currently only .epd books are supported. If compressed with .zip the name must be a.epd.zip. No other compression format is supported right now.')
         raise Exception('Cannot handle opening book')
 
     destination_temp_file_path = os.path.abspath(os.path.join(directory, temp_filename))
@@ -1438,17 +1448,20 @@ def setup_book(directory, args):
             zipped = zipfile.ZipFile(destination_temp_file_path, mode='r')
             names = zipped.namelist()
             if len(names) > 1 or names[0] != filename:
-                print(f'Expected only a book with name {filename} in the archive but did not find it or found more')
+                LOGGER.error(f'Expected only a book with name {filename} in the archive but did not find it or found more')
                 raise Exception('Unexpected opening book archive content.')
-            print(f'Extracting {temp_filename} to {filename}')
+            LOGGER.info(f'Extracting {temp_filename} to {filename}')
             zipped.extract(filename, directory)
 
-    print('Book setup completed.')
+    LOGGER.info('Book setup completed.')
 
 def main():
-    print('Initializing...')
+    LOGGER.info('Initializing...')
 
     args = parse_cli_args()
+
+    if not args.tui:
+        LOGGER.addHandler(logging.StreamHandler(stream=sys.stdout))
 
     absolute_workspace_path = os.path.abspath(args.workspace_path)
     experiment_directory = os.path.join(absolute_workspace_path, f'experiments/experiment_{args.experiment_name}')
@@ -1456,7 +1469,7 @@ def main():
         os.makedirs(experiment_directory, exist_ok=False)
     except FileExistsError as e:
         if args.fail_on_experiment_exists and os.listdir(experiment_directory):
-            print(f'Directory {experiment_directory} already exists. An experiment must use a new directory.')
+            LOGGER.error(f'Directory {experiment_directory} already exists. An experiment must use a new directory.')
             return
 
     ordo_directory = os.path.join(absolute_workspace_path, 'ordo')
@@ -1478,7 +1491,7 @@ def main():
     do_network_training = args.do_network_training and args.training_dataset
 
     if do_network_testing:
-        print('Engines provided. Enabling network testing.')
+        LOGGER.info('Engines provided. Enabling network testing.')
 
         setup_book(books_directory, args)
 
@@ -1489,13 +1502,13 @@ def main():
         setup_stockfish(stockfish_base_directory, stockfish_base_repo, stockfish_base_branch_or_commit, args.build_engine_arch, args.build_threads)
         setup_stockfish(stockfish_test_directory, stockfish_test_repo, stockfish_test_branch_or_commit, args.build_engine_arch, args.build_threads)
     else:
-        print('Not doing network testing. Either engines no provided or explicitely disabled.')
+        LOGGER.info('Not doing network testing. Either engines no provided or explicitely disabled.')
 
     nnue_pytorch_repo = '/'.join(args.nnue_pytorch.split('/')[:2])
     nnue_pytorch_branch_or_commit = args.nnue_pytorch.split('/')[2]
     setup_nnue_pytorch(nnue_pytorch_directory, nnue_pytorch_repo, nnue_pytorch_branch_or_commit)
 
-    print('Initialization completed.')
+    LOGGER.info('Initialization completed.')
 
     # Directory layout:
     #     tmp/experiments/experiment_{name}/training/run_{i}
@@ -1536,9 +1549,9 @@ def main():
                     validation_size=args.validation_size,
                     additional_args=[arg for arg in args.additional_training_args or []]
                 ))
-        print(f'Doing network training on gpus {gpu_ids}. {len(training_runs)} runs in total.')
+        LOGGER.info(f'Doing network training on gpus {gpu_ids}. {len(training_runs)} runs in total.')
     else:
-        print('Not training networks.')
+        LOGGER.info('Not training networks.')
 
     network_testing = NetworkTesting(
         nnue_pytorch_directory=nnue_pytorch_directory,
