@@ -618,6 +618,10 @@ class TrainingRun(Thread):
     def error(self):
         return self._error
 
+    @property
+    def batch_size(self):
+        return self._batch_size
+
 def requests_get_content(url, *args, **kwargs):
     try:
         result = requests.get(url, *args, **kwargs)
@@ -1183,6 +1187,7 @@ class TrainerRunsWidget(Widget):
                 step_in_epoch = run.current_step_in_epoch
                 max_step = run.num_steps_in_epoch - 1
                 speed = run.smooth_iterations_per_second
+                speed_mnps = run.smooth_iterations_per_second * run.batch_size / 1e6
 
                 total_steps = run.num_epochs * run.num_steps_in_epoch
                 step = epoch * run.num_steps_in_epoch + step_in_epoch
@@ -1191,7 +1196,8 @@ class TrainerRunsWidget(Widget):
                 eta_str = duration_string_from_seconds_compact(eta_seconds)
 
                 return [
-                    f'  Run {run.run_id} - {complete_pct:0.2f}% ({speed:0.1f}it/s) [ETA {eta_str}]',
+                    f'  Run {run.run_id} - {complete_pct:0.2f}% [ETA {eta_str}]',
+                    f'    Speed: {speed:0.1f}it/s; {speed:0.1f}Mpos/s',
                     f'    Epoch: {epoch}/{max_epoch}; Step: {step_in_epoch}/{max_step}',
                     f'    Loss: {loss}',
                 ]
