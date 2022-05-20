@@ -356,11 +356,11 @@ def find_latest_checkpoint_in_run(root_dir):
 
     return str(max(ckpts, key=lambda p: p.stat().st_ctime_ns))
 
-global_resource_monitor = SystemResourcesMonitor(2)
-numeric_const_pattern = '[-+]?(?:(?:\d*\.\d+)|(?:\d+\.?))(?:[Ee][+-]?\d+)?'
+RESOURCE_MONITOR = SystemResourcesMonitor(2)
+NUMERIC_CONST_PATTERN = '[-+]?(?:(?:\d*\.\d+)|(?:\d+\.?))(?:[Ee][+-]?\d+)?'
 
 class TrainingRun(Thread):
-    ITERATION_PATTERN = re.compile(f'Epoch (\\d+).*?(\\d+)/(\\d+).*?({numeric_const_pattern})it/s, loss=({numeric_const_pattern})')
+    ITERATION_PATTERN = re.compile(f'Epoch (\\d+).*?(\\d+)/(\\d+).*?({NUMERIC_CONST_PATTERN})it/s, loss=({NUMERIC_CONST_PATTERN})')
     def __init__(
         self,
         gpu_id,
@@ -951,8 +951,8 @@ class NetworkTesting(Thread):
         return args
 
     def get_status_string(self):
-        global global_resource_monitor
-        cpu_usage = global_resource_monitor.resources.cpu_usage
+        global RESOURCE_MONITOR
+        cpu_usage = RESOURCE_MONITOR.resources.cpu_usage
         if not self._active:
             return 'Network testing inactive.'
         elif self._has_exited_unexpectedly:
@@ -1123,8 +1123,8 @@ class TrainerRunsWidget(Widget):
             )
 
     def _get_gpu_usage(self, gpu_ids):
-        global global_resource_monitor
-        gpus = global_resource_monitor.resources.gpus
+        global RESOURCE_MONITOR
+        gpus = RESOURCE_MONITOR.resources.gpus
         by_gpu_id = dict()
         for gpu_id in gpu_ids:
             if gpu_id in gpus:
@@ -1651,4 +1651,4 @@ if __name__ == '__main__':
     try:
         main()
     finally:
-        global_resource_monitor.stop()
+        RESOURCE_MONITOR.stop()
