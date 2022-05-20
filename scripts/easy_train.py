@@ -427,7 +427,6 @@ class TrainingRun(Thread):
         self._networks = []
         self._process = None
         self._running = False
-        self._has_exited_unexpectedly = False
         self._error = None
 
         self._last_time = None
@@ -527,8 +526,6 @@ class TrainingRun(Thread):
 
                         self._current_loss = float(matches.group(5))
                         self._has_started = True
-                        if self._current_epoch == self._num_epochs - 1 and self._current_step_in_epoch >= self._num_steps_in_epoch:
-                            self._has_finished = True
                         if self._current_step_in_epoch % 100 == 0:
                             LOGGER.info(line)
                 except:
@@ -538,18 +535,23 @@ class TrainingRun(Thread):
                     self._error = 'Cuda out of memory error.'
                     break
 
-        if self._has_finished:
-            self._running = False
+        # Since _num_steps_in_epochs includes validation steps, that we cannot actually catch
+        # and we don't know how to account for validation steps, and the trainer exits silently,
+        # we can just estimate whether it finished with a success by using some margin...
+        # NOTE: We still cannot catch when the trainer exits with no work, which for example
+        #       happens when resuming from a checkpoint at the end of training.
+        if self._has_started and self._current_epoch == self._num_epochs - 1 and self._current_step_in_epoch >= self._num_steps_in_epoch * 0.9:
+            self._has_finished = True
 
-        self._has_finished = True
-        if self._running:
+        if self._running and not self._has_finished:
+            if not self._error:
+                self._error = 'Unknown error occured.'
             LOGGER.warning(f'Training run {self._run_id} exited unexpectedly.')
-            if self._error:
-                LOGGER.error(f'Error: {self._error}')
-            self._has_exited_unexpectedly = True
+            LOGGER.error(f'Error: {self._error}')
         else:
             LOGGER.info(f'Training run {self._run_id} finished.')
 
+        self._has_started = True
         self._running = False
 
     def stop(self):
@@ -607,8 +609,8 @@ class TrainingRun(Thread):
         return self._networks
 
     @property
-    def has_exited_unexpectedly(self):
-        return self._has_exited_unexpectedly
+    def is_running(self):
+        return self._running
 
     @property
     def error(self):
@@ -1142,16 +1144,15 @@ class TrainerRunsWidget(Widget):
 
     def _make_run_text(self, run):
         if run.has_finished:
-            if run.has_exited_unexpectedly:
-                lines = [f'  Run {run.run_id} - Exited unexpectedly.']
-                if run.error:
-                    lines += [f'    Error: {run.error}']
-                return lines
-            else:
-                loss = run.current_loss
-                return [f'  Run {run.run_id} - Completed; Loss: {loss}']
+            loss = run.current_loss
+            return [f'  Run {run.run_id} - Completed; Loss: {loss}']
         elif not run.has_started:
             return f'  Run {run.run_id} - Starting...',
+        elif not run.is_running:
+            lines = [f'  Run {run.run_id} - Exited unexpectedly.']
+            if run.error:
+                lines += [f'    Error: {run.error}']
+            return lines
         else:
             try:
                 width = self._w - self._offset
