@@ -5,7 +5,7 @@ python easy_train.py \
     --threads=2 \
     --gpus="0," \
     --runs-per-gpu=1 \
-    --batch-size=1024 \
+    --batch-size=16384 \
     --max_epoch=10 \
     --do-network-training=True \
     --do-network-testing=True \
@@ -15,8 +15,8 @@ python easy_train.py \
     --fail-on-experiment-exists=False \
     --build-engine-arch=x86-64-modern \
     --build-threads=2 \
-    --epoch-size=1048500 \
-    --validation-size=4096 \
+    --epoch-size=1638400 \
+    --validation-size=16384 \
     --network-testing-threads=8 \
     --network-testing-explore-factor=1.5 \
     --network-testing-book="https://github.com/official-stockfish/books/raw/master/UHO_XXL_+0.90_+1.19.epd.zip" \

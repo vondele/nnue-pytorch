@@ -11,6 +11,7 @@ import importlib.metadata
 import argparse
 import math
 import logging
+import time
 
 logging.basicConfig()
 LOGGER = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ def validate_gcc():
     try:
         out = run_for_version('gcc')
         parts = out.split('\n')[0].split()
-        version_str = parts[-1]
+        version_str = parts[2] # sometimes there are trailing strings in the version number
         major_version = int(version_str.split('.')[0])
         minor_version = int(version_str.split('.')[1])
         success = (major_version, minor_version) >= (9, 2)
@@ -157,7 +158,7 @@ def validate_pytorch():
         if not 'cu' in pkg.version:
             LOGGER.error(f'Found torch without CUDA but CUDA support required. Exiting')
             return False
-        elif pkg.is_version_at_least((1, 8)):
+        elif pkg.is_version_at_least((1, 7)):
             LOGGER.info(f'Found torch version {pkg.version}. OK.')
             return True
         else:
@@ -242,6 +243,7 @@ from pathlib import Path
 
 ORDO_GIT = ('michiguel/Ordo', '17eec774f2e4b9fdd2b1b38739f55ea221fb851a')
 C_CHESS_CLI_GIT = ('lucasart/c-chess-cli', '6d08fee2e95b259c486b21a886f6911b61f676af')
+TIMEOUT = 600.0 # on some systems starting pytorch can be really slow
 
 def terminate_process_on_exit(process):
     if sys.platform == "win32":
@@ -418,6 +420,7 @@ class TrainingRun(Thread):
         self._gpu_id = gpu_id
         self._run_id = run_id
         # use abspaths because we will be running the script from somewhere else
+
         self._nnue_pytorch_directory = os.path.abspath(nnue_pytorch_directory)
         self._training_dataset = os.path.abspath(training_dataset)
         self._validation_dataset = os.path.abspath(validation_dataset)
@@ -669,7 +672,7 @@ def get_zipfile_members_strip_common_prefix(zipfile):
 
 def git_download_branch_or_commit(directory, repo, branch_or_commit):
     url = f'http://github.com/{repo}/zipball/{branch_or_commit}'
-    zipped_content = requests_get_content(url, timeout=60.0)
+    zipped_content = requests_get_content(url, timeout=TIMEOUT)
     zipped_input = zipfile.ZipFile(io.BytesIO(zipped_content), mode='r')
     zipped_input.extractall(directory, get_zipfile_members_strip_common_prefix(zipped_input))
 
@@ -683,7 +686,7 @@ def is_ordo_setup(directory):
     try:
         ordo_path = make_ordo_executable_path(directory)
         with subprocess.Popen([ordo_path, '--help'], stdout=subprocess.DEVNULL) as process:
-            if process.wait(timeout=10.0):
+            if process.wait(timeout=TIMEOUT):
                 return False
             return True
     except:
@@ -726,7 +729,7 @@ def is_c_chess_cli_setup(directory):
     try:
         path = make_c_ches_cli_executable_path(directory)
         with subprocess.Popen([path, '-version'], stdout=subprocess.DEVNULL) as process:
-            if process.wait(timeout=10.0):
+            if process.wait(timeout=TIMEOUT):
                 return False
             return True
     except:
@@ -756,7 +759,7 @@ def is_stockfish_setup(directory):
     try:
         path = make_stockfish_executable_path(directory)
         with subprocess.Popen([path, 'compiler'], stdout=subprocess.DEVNULL) as process:
-            if process.wait(timeout=10.0):
+            if process.wait(timeout=TIMEOUT):
                 return False
             return True
     except:
@@ -789,7 +792,7 @@ def setup_stockfish(directory, repo, branch_or_commit, arch, threads=1):
 def is_nnue_pytorch_setup(directory):
     try:
         with subprocess.Popen([sys.executable, 'nnue_dataset.py'], cwd=directory) as process:
-            if process.wait(timeout=30.0):
+            if process.wait(timeout=TIMEOUT):
                 return False
             return True
     except:
@@ -812,7 +815,7 @@ def setup_nnue_pytorch(directory, repo, branch_or_commit):
             raise Exception(f'nnue-pytorch {repo}/{branch_or_commit} data loader compilation failed')
 
     if not is_nnue_pytorch_setup(directory):
-        raise Exception(f'Incorrect nnue-pytorch setup.')
+        raise Exception(f'Incorrect nnue-pytorch setup or timeout.')
 
 class OrdoEntry:
     # nets are named experiment_path/run_{}/nn-epoch{}.nnue
@@ -1193,6 +1196,7 @@ class TrainerRunsWidget(Widget):
         return list(ids)
 
     def _make_run_text(self, run):
+        # TODO some output for the logger
         if run.has_finished:
             loss = run.current_loss
             return [f'  Run {run.run_id} - Completed; Loss: {loss}']
@@ -1232,6 +1236,7 @@ class TrainerRunsWidget(Widget):
                 ]
 
     def _make_gpu_text(self, gpu_id, gpu_usage):
+        # TODO some output for the logger
         if gpu_id in gpu_usage:
             gpu_compute_pct = gpu_usage[gpu_id]['compute_pct']
             gpu_memory_mb = gpu_usage[gpu_id]['memory_mb']
@@ -1484,6 +1489,11 @@ def parse_cli_args():
     args = parser.parse_args()
 
     args.validation_dataset = args.validation_dataset or args.training_dataset
+    if not Path(args.validation_dataset).is_file():
+        raise Exception(f'Invalid validation data set file name: {args.validation_dataset}')
+
+    if not Path(args.training_dataset).is_file():
+        raise Exception(f'Invalid training data set file name: {args.training_dataset}')
 
     # these are not required because testing is optional
     if args.engine_base and args.engine_base.count('/') != 2:
@@ -1748,6 +1758,8 @@ def main():
         additional_args=[arg for arg in args.additional_testing_args or []]
     )
 
+    #TODO it would be nice to be able to set a time limit at the cmdline and stop after e.g. 20h
+
     for tr in training_runs:
         tr.start()
 
@@ -1766,11 +1778,15 @@ def main():
                 last_scene = e.scene
     else:
         while True:
-            v = input()
-            if v == 'quit':
-                break
-            else:
-                print('Type `quit` to stop.')
+            try:
+                v = input()
+                if v == 'quit':
+                    break
+                else:
+                    print('Type `quit` to stop.')
+            except EOFError:
+                # For non-interactive environments
+                time.sleep(1)
 
     for tr in training_runs:
         tr.stop()
