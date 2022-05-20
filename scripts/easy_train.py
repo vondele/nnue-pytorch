@@ -508,21 +508,23 @@ class TrainingRun(Thread):
                         # There appears to be a pytorch lightning bug where it displays
                         # negative speed when running from checkpoint. So we work around this
                         # by computing our own speed.
-                        curr_step = self._current_epoch * self._num_steps_in_epoch + self._current_step_in_epoch
+                        # Only update every 10 steps to avoid the it/s to blow up.
+                        curr_step = self._current_step_in_epoch
                         if curr_step == self._last_step:
                             continue
 
                         curr_time = time.perf_counter_ns()
-                        if self._last_time is None:
+                        if self._last_time is None or curr_step < self._last_step:
                             self._last_time = curr_time
                             self._last_step = curr_step
                             continue
 
                         #self._momentary_iterations_per_second = float(matches.group(4))
-                        self._momentary_iterations_per_second = (curr_step-self._last_step)/((curr_time-self._last_time)/1e9)
-                        self._smooth_iterations_per_second.update(self._momentary_iterations_per_second)
-                        self._last_time = curr_time
-                        self._last_step = curr_step
+                        if curr_step % 10 == 0:
+                            self._momentary_iterations_per_second = (curr_step-self._last_step)/((curr_time-self._last_time)/1e9)
+                            self._smooth_iterations_per_second.update(self._momentary_iterations_per_second)
+                            self._last_time = curr_time
+                            self._last_step = curr_step
 
                         self._current_loss = float(matches.group(5))
                         self._has_started = True
