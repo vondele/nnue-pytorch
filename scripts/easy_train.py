@@ -1665,7 +1665,7 @@ def main():
                     gamma=args.gamma,
                     network_save_period=args.network_save_period,
                     save_last_network=args.save_last_network,
-                    seed=args.seed,
+                    seed=args.seed + run_id,
                     start_from_model=start_model,
                     root_dir=os.path.join(experiment_directory, 'training', f'run_{run_id}'),
                     epoch_size=args.epoch_size,
