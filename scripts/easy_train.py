@@ -951,6 +951,8 @@ class NetworkTesting(Thread):
         return args
 
     def get_status_string(self):
+        global global_resource_monitor
+        cpu_usage = global_resource_monitor.resources.cpu_usage
         if not self._active:
             return 'Network testing inactive.'
         elif self._has_exited_unexpectedly:
@@ -965,6 +967,7 @@ class NetworkTesting(Thread):
         elif self._current_test is not None:
             perf_pct = int(round(self._current_test.performance * 100))
             lines = [
+                f'CPU load: {cpu_usage * 100:0.1f}%',
                 f'Testing run {self._current_test.run_id} epoch {self._current_test.epoch}',
                 f'+{self._current_test.wins}={self._current_test.draws}-{self._current_test.losses} [{perf_pct:0.1f}%] ({self._current_test.total_games}/{self._games_per_round})',
                 f'{self._current_test.elo:0.1f}±{self._current_test.elo_error_95:0.1f} Elo'
