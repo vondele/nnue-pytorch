@@ -384,7 +384,7 @@ class TrainingRun(Thread):
         root_dir,
         epoch_size,
         validation_size,
-        resume_from_model=None,
+        start_from_model=None,
         resume_training=False,
         additional_args=[]
     ):
@@ -412,7 +412,7 @@ class TrainingRun(Thread):
         self._root_dir = os.path.abspath(root_dir)
         self._epoch_size = epoch_size
         self._validation_size = validation_size
-        self._resume_from_model = resume_from_model
+        self._start_from_model = start_from_model
         self._resume_training = resume_training
         self._additional_args = additional_args
 
@@ -468,8 +468,8 @@ class TrainingRun(Thread):
                 args.append(f'--resume_from_checkpoint={ckpt_path}')
                 resumed = True
 
-        if self._resume_from_model and not resumed:
-            args.append(f'--resume-from-model={args._resume_from_model}')
+        if self._start_from_model and not resumed:
+            args.append(f'--resume-from-model={args._start_from_model}')
 
         for arg in self._additional_args:
             args.append(arg)
@@ -1423,7 +1423,7 @@ def parse_cli_args():
     parser.add_argument("--smart-fen-skipping", default=True, type=str2bool, dest='smart_fen_skipping', help="If used then no smart fen skipping will be done. By default smart fen skipping is done.")
     parser.add_argument("--wld-fen-skipping", default=True, type=str2bool, dest='wld_fen_skipping', help="If used then no wld fen skipping will be done. By default wld fen skipping is done.")
     parser.add_argument("--random-fen-skipping", default=3, type=int, dest='random_fen_skipping', help="skip fens randomly on average random_fen_skipping before using one.")
-    parser.add_argument("--resume-from-model", default=None, type=str, dest='resume_from_model', help="Initializes training using the weights from the given .pt model")
+    parser.add_argument("--start-from-model", default=None, type=str, dest='start_from_model', help="Initializes training using the weights from the given .pt model")
     parser.add_argument("--gpus", type=str, dest='gpus', default='0')
     parser.add_argument("--runs-per-gpu", type=int, dest='runs_per_gpu', default=1)
     parser.add_argument("--features", type=str, help="The feature set to use")
@@ -1614,7 +1614,7 @@ def main():
                     network_save_period=args.network_save_period,
                     save_last_network=args.save_last_network,
                     seed=args.seed,
-                    resume_from_model=args.resume_from_model,
+                    start_from_model=args.start_from_model,
                     root_dir=os.path.join(experiment_directory, 'training', f'run_{run_id}'),
                     epoch_size=args.epoch_size,
                     validation_size=args.validation_size,
