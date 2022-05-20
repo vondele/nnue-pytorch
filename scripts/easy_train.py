@@ -951,7 +951,6 @@ class NetworkTesting(Thread):
         return args
 
     def get_status_string(self):
-        global RESOURCE_MONITOR
         cpu_usage = RESOURCE_MONITOR.resources.cpu_usage
         if not self._active:
             return 'Network testing inactive.'
@@ -1123,7 +1122,6 @@ class TrainerRunsWidget(Widget):
             )
 
     def _get_gpu_usage(self, gpu_ids):
-        global RESOURCE_MONITOR
         gpus = RESOURCE_MONITOR.resources.gpus
         by_gpu_id = dict()
         for gpu_id in gpu_ids:
