@@ -1020,7 +1020,7 @@ class NetworkTesting(Thread):
             ]
             return '\n'.join(lines)
         else:
-            return 'Waiting for work...'
+            return 'Waiting for networks...'
 
     def run(self):
         if not self._active:
