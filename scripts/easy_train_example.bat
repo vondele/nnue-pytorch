@@ -23,9 +23,9 @@ python easy_train.py ^
     --network-testing-nodes-per-move=1000 ^
     --network-testing-hash-mb=8 ^
     --network-testing-games-per-round=200 ^
-    --engine-base=official-stockfish/Stockfish/master ^
-    --engine-test=official-stockfish/Stockfish/master ^
-    --nnue-pytorch=Sopel97/nnue-pytorch/easy_train ^
+    --engine-base-branch=official-stockfish/Stockfish/master ^
+    --engine-test-branch=official-stockfish/Stockfish/master ^
+    --nnue-pytorch-branch=Sopel97/nnue-pytorch/easy_train ^
     --workspace-path=./easy_train_data ^
     --experiment-name=test ^
     --resume-training=True ^

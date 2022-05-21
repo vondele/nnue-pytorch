@@ -1442,10 +1442,10 @@ def parse_cli_args():
         description="Trains the network.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--workspace-path", type=str, dest='workspace_path')
+    parser.add_argument("--workspace-path", type=str, default='./easy_train_data', dest='workspace_path')
     parser.add_argument("--experiment-name", type=str, dest='experiment_name')
-    parser.add_argument("--training-dataset", type=str, dest='training_dataset', help="Training data (.bin or .binpack)")
-    parser.add_argument("--validation-dataset", type=str, dest='validation_dataset', default=None, help="Validation data (.bin or .binpack)")
+    parser.add_argument("--training-dataset", type=str, dest='training_dataset', help="Training data file name (.bin or .binpack)")
+    parser.add_argument("--validation-dataset", type=str, dest='validation_dataset', default=None, help="Validation data file name (.bin or .binpack), defaults to training data")
     parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
     parser.add_argument("--gamma", default=0.992, type=float, dest='gamma', help="Multiplicative factor applied to the learning rate after every epoch.")
     parser.add_argument("--lr", default=8.75e-4, type=float, dest='lr', help="Initial learning rate.")
@@ -1466,9 +1466,9 @@ def parse_cli_args():
     parser.add_argument("--save-last-network", default=True, dest='save_last_network', help="Whether to always save the last produced network.")
     parser.add_argument("--additional-training-arg", type=str, nargs='*', dest='additional_training_args', help="Additional training args passed verbatim.")
     parser.add_argument("--additional-testing-arg", type=str, nargs='*', dest='additional_testing_args', help="Additional network testing args passed verbatim.")
-    parser.add_argument("--engine-base", type=str, dest='engine_base', help="Path to the commit/branch to use for the engine baseline. For example 'official-stockfish/Stockfish/master'")
-    parser.add_argument("--engine-test", type=str, dest='engine_test', help="Path to the commit/branch to use for the engine being tested. For example 'official-stockfish/Stockfish/master'")
-    parser.add_argument("--nnue-pytorch", type=str, dest='nnue_pytorch', help="Path to the commit/branch to use for the trainer being tested. For example 'glinscott/nnue-pytorch/master'")
+    parser.add_argument("--engine-base-branch", type=str, default='official-stockfish/Stockfish/master', dest='engine_base_branch', help="Path to the commit/branch to use for the engine baseline.")
+    parser.add_argument("--engine-test-branch", type=str, default='official-stockfish/Stockfish/master', dest='engine_test_branch', help="Path to the commit/branch to use for the engine being tested.")
+    parser.add_argument("--nnue-pytorch-branch", type=str, default='glinscott/nnue-pytorch/master', dest='nnue_pytorch_branch', help="Path to the commit/branch to use for the trainer being tested.")
     parser.add_argument("--build-engine-arch", type=str, default='x86-64-modern', dest='build_engine_arch', help="ARCH to use for engine compilation")
     parser.add_argument("--build-threads", type=int, default=1, dest='build_threads', help="Number of threads to use for compilation")
     parser.add_argument("--fail-on-experiment-exists", type=str2bool, default=True, dest='fail_on_experiment_exists', help="By default an experiment must be created in an empty directory. Should only be used for debugging.")
@@ -1499,15 +1499,15 @@ def parse_cli_args():
         raise Exception(f'Invalid training data set file name: {args.training_dataset}')
 
     # these are not required because testing is optional
-    if args.engine_base and args.engine_base.count('/') != 2:
-        raise Exception('Invalid base engine repo path')
+    if args.engine_base_branch and args.engine_base_branch.count('/') != 2:
+        raise Exception(f'Invalid base engine repo path: {args.engine_base_branch}')
 
-    if args.engine_test and args.engine_test.count('/') != 2:
-        raise Exception('Invalid test engine repo path')
+    if args.engine_test_branch and args.engine_test_branch.count('/') != 2:
+        raise Exception(f'Invalid test engine repo path: {args.engine_test_branch}')
 
     # this one is required because it has other important scripts
-    if not args.nnue_pytorch or args.nnue_pytorch.count('/') != 2:
-        raise Exception('Invalid test trainer repo path')
+    if not args.nnue_pytorch_branch or args.nnue_pytorch_branch.count('/') != 2:
+        raise Exception(f'Invalid test trainer repo path: {args.nnue_pytorch_branch}')
 
     if not args.network_testing_time_per_move and not args.network_testing_nodes_per_move:
         args.network_testing_nodes_per_move=25000
@@ -1655,7 +1655,7 @@ def main():
 
     setup_c_chess_cli(c_chess_cli_directory)
 
-    do_network_testing = args.engine_base and args.engine_test and args.do_network_testing
+    do_network_testing = args.engine_base_branch and args.engine_test_branch and args.do_network_testing
     do_network_training = args.do_network_training and args.training_dataset
 
     if do_network_testing:
@@ -1663,17 +1663,17 @@ def main():
 
         setup_book(books_directory, args)
 
-        stockfish_base_repo = '/'.join(args.engine_base.split('/')[:2])
-        stockfish_test_repo = '/'.join(args.engine_test.split('/')[:2])
-        stockfish_base_branch_or_commit = args.engine_base.split('/')[2]
-        stockfish_test_branch_or_commit = args.engine_test.split('/')[2]
+        stockfish_base_repo = '/'.join(args.engine_base_branch.split('/')[:2])
+        stockfish_test_repo = '/'.join(args.engine_test_branch.split('/')[:2])
+        stockfish_base_branch_or_commit = args.engine_base_branch.split('/')[2]
+        stockfish_test_branch_or_commit = args.engine_test_branch.split('/')[2]
         setup_stockfish(stockfish_base_directory, stockfish_base_repo, stockfish_base_branch_or_commit, args.build_engine_arch, args.build_threads)
         setup_stockfish(stockfish_test_directory, stockfish_test_repo, stockfish_test_branch_or_commit, args.build_engine_arch, args.build_threads)
     else:
         LOGGER.info('Not doing network testing. Either engines no provided or explicitely disabled.')
 
-    nnue_pytorch_repo = '/'.join(args.nnue_pytorch.split('/')[:2])
-    nnue_pytorch_branch_or_commit = args.nnue_pytorch.split('/')[2]
+    nnue_pytorch_repo = '/'.join(args.nnue_pytorch_branch.split('/')[:2])
+    nnue_pytorch_branch_or_commit = args.nnue_pytorch_branch.split('/')[2]
     setup_nnue_pytorch(nnue_pytorch_directory, nnue_pytorch_repo, nnue_pytorch_branch_or_commit)
 
     LOGGER.info('Initialization completed.')
