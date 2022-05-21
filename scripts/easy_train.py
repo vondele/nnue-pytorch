@@ -1488,6 +1488,9 @@ def parse_cli_args():
     parser.add_argument("--resume-training", type=str2bool, default=False, dest='resume_training', help="Attempts to resume each run from its latest checkpoint.")
     args = parser.parse_args()
 
+    if not args.training_dataset:
+        raise Exception('No training data specified')
+
     args.validation_dataset = args.validation_dataset or args.training_dataset
     if not Path(args.validation_dataset).is_file():
         raise Exception(f'Invalid validation data set file name: {args.validation_dataset}')
