@@ -1513,8 +1513,8 @@ def parse_cli_args():
         args.network_testing_nodes_per_move=25000
         LOGGER.info(f'No time control specified. Using a default {args.network_testing_nodes_per_move} nodes per move')
 
-    if [args.start_from_model, args.resume_training, args.start_from_experiment].count(True) > 1:
-        raise Exception('Only one of --start-from-model, --resume-training, and --start-from-experiment can be specified at a time.')
+    if [args.start_from_model, args.start_from_experiment].count(True) > 1:
+        raise Exception('Only one of --start-from-model and --start-from-experiment can be specified at a time.')
 
     if args.start_from_experiment and not args.start_from_experiment.startswith('experiment_'):
         args.start_from_experiment = 'experiment_' + args.start_from_experiment
@@ -1630,6 +1630,10 @@ def main():
 
     args = parse_cli_args()
 
+    # if we ask to resume don't fail on existing directory
+    if args.resume_training:
+       args.fail_on_experiment_exists=False
+
     absolute_workspace_path = os.path.abspath(args.workspace_path)
     experiment_directory = os.path.join(absolute_workspace_path, f'experiments/experiment_{args.experiment_name}')
     try:
@@ -1637,6 +1641,7 @@ def main():
     except FileExistsError as e:
         if args.fail_on_experiment_exists and os.listdir(experiment_directory):
             LOGGER.error(f'Directory {experiment_directory} already exists. An experiment must use a new directory.')
+            LOGGER.error(f'Alternatively, override this with the option --resume-training=True or --fail-on-experiment-exists=False.')
             return
 
     ordo_directory = os.path.join(absolute_workspace_path, 'ordo')
