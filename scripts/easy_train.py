@@ -1433,7 +1433,10 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 def parse_cli_args():
-    parser = argparse.ArgumentParser(description="Trains the network.")
+    parser = argparse.ArgumentParser(
+        description="Trains the network.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument("--workspace-path", type=str, dest='workspace_path')
     parser.add_argument("--experiment-name", type=str, dest='experiment_name')
     parser.add_argument("--training-dataset", type=str, dest='training_dataset', help="Training data (.bin or .binpack)")
