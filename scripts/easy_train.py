@@ -1220,7 +1220,7 @@ class TrainerRunsWidget(Widget):
                 step_in_epoch = run.current_step_in_epoch
                 max_step = run.num_steps_in_epoch - 1
                 speed = run.smooth_iterations_per_second
-                speed_mnps = run.smooth_iterations_per_second * run.batch_size / 1e6
+                speed_knps = run.smooth_iterations_per_second * run.batch_size / 1e3
 
                 total_steps = run.num_epochs * run.num_steps_in_epoch
                 step = epoch * run.num_steps_in_epoch + step_in_epoch
@@ -1230,7 +1230,7 @@ class TrainerRunsWidget(Widget):
 
                 return [
                     f'  Run {run.run_id} - {complete_pct:0.2f}% [ETA {eta_str}]',
-                    f'    Speed: {speed:0.1f}it/s; {speed:0.1f}Mpos/s',
+                    f'    Speed: {speed:0.1f}it/s; {speed_knps:0.0f}kpos/s',
                     f'    Epoch: {epoch}/{max_epoch}; Step: {step_in_epoch}/{max_step}',
                     f'    Loss: {loss}',
                 ]
