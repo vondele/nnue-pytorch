@@ -1510,7 +1510,8 @@ def parse_cli_args():
         raise Exception('Invalid test trainer repo path')
 
     if not args.network_testing_time_per_move and not args.network_testing_nodes_per_move:
-        raise Exception('No time control specified.')
+        args.network_testing_nodes_per_move=25000
+        LOGGER.info(f'No time control specified. Using a default {args.network_testing_nodes_per_move} nodes per move')
 
     if [args.start_from_model, args.resume_training, args.start_from_experiment].count(True) > 1:
         raise Exception('Only one of --start-from-model, --resume-training, and --start-from-experiment can be specified at a time.')
