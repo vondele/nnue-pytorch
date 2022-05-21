@@ -163,7 +163,9 @@ def run_ordo(root_dir, ordo_exe, concurrency):
         else:
             os.replace(ordo_file_name_temp, ordo_file_name)
 
-    print("Finished running ordo.")
+    # Newlines make it less likely the output is on a line of the running match results
+    # Probably both threads needs some cleaner way to do I/O
+    print("\n\nFinished running ordo.\n\n")
 
 def run_round(
     root_dir,
@@ -232,6 +234,7 @@ def run_round(
         target=run_ordo,
         args=(root_dir, ordo_exe, concurrency)
     )
+    # TODO/BUG both threads generate output, that can be corrupted, making the calling process confused
     run_match_thread.start()
     run_ordo_thread.start()
 
