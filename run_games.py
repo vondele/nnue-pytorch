@@ -7,7 +7,7 @@ import argparse
 import features
 import shutil
 import threading
-from pathlib import Path
+from pathlib import Path, PurePath
 
 class GameParams:
     def __init__(self, hash, threads, games_per_round, time_per_move=None, time_increment_per_move=None, nodes_per_move=None):
@@ -84,7 +84,9 @@ def parse_ordo(root_dir, nnues):
                 net = fields[1]
                 rating = float(fields[3])
                 error = float(fields[4])
-                ordo_scores[net] = (rating, error)
+                for name in nnues:
+                    if net in name:
+                       ordo_scores[name] = (rating, error)
 
     return ordo_scores
 
@@ -110,7 +112,8 @@ def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfis
     command += ['-engine', f'cmd={stockfish_base}', 'name=master']
     for net in best:
         evalfile = os.path.join(os.getcwd(), net)
-        command += ['-engine', f'cmd={stockfish_test}', f'name={net}', f'option.EvalFile={evalfile}']
+        netname = PurePath(*PurePath(evalfile).parts[-2:])
+        command += ['-engine', f'cmd={stockfish_test}', f'name={netname}', f'option.EvalFile={evalfile}']
 
     print("Running match with c-chess-cli ... {}".format(pgn_file_name), flush=True)
     c_chess_out = open(os.path.join(root_dir, "c_chess.out"), 'w')

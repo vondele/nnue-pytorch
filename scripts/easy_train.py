@@ -561,6 +561,7 @@ class TrainingRun(Thread):
                         if self._current_step_in_epoch % 100 == 0:
                             LOGGER.info(line)
                 except:
+                    LOGGER.info(line)
                     pass
                 if 'CUDA_ERROR_OUT_OF_MEMORY' in line or 'CUDA out of memory' in line:
                     self._process.terminate()
@@ -1049,6 +1050,8 @@ class NetworkTesting(Thread):
                 if not self._running:
                     break
                 line = reader.readline().strip()
+                if not line.startswith('Score of'):
+                   LOGGER.info(line)
                 if line.startswith('Finished running ordo.'):
                     self._update_results_from_ordo_file(self._get_ordo_file_path())
                 elif line.startswith('Score of'):
@@ -1105,7 +1108,8 @@ class NetworkTesting(Thread):
         try:
             with open(ordo_file_path, 'r') as ordo_file:
                 lines = ordo_file.readlines()
-                LOGGER.info(lines[:5])
+                for line in lines[:7]:
+                    LOGGER.info(line.strip())
                 for line in lines:
                     try:
                         entry = OrdoEntry(line=line)
