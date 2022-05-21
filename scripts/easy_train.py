@@ -1442,6 +1442,9 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 def parse_cli_args():
+    default_pytorch_threads=2
+    default_data_loader_threads=4
+    default_testing_threads=max(1, os.cpu_count() - default_pytorch_threads - default_data_loader_threads)
     parser = argparse.ArgumentParser(
         description="Trains the network.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -1453,17 +1456,17 @@ def parse_cli_args():
     parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
     parser.add_argument("--gamma", default=0.992, type=float, dest='gamma', help="Multiplicative factor applied to the learning rate after every epoch.")
     parser.add_argument("--lr", default=8.75e-4, type=float, dest='lr', help="Initial learning rate.")
-    parser.add_argument("--num-workers", default=4, type=int, dest='num_workers', help="Number of worker threads to use for data loading (binpacks). Increase with large skipping rates, or underloaded GPUs")
+    parser.add_argument("--num-workers", default=default_data_loader_threads, type=int, dest='num_workers', help="Number of worker threads to use for data loading (binpacks). Increase with large skipping rates, or underloaded GPUs")
     parser.add_argument("--batch-size", default=16384, type=int, dest='batch_size', help="Number of positions per batch / per iteration.")
-    parser.add_argument("--threads", default=2, type=int, dest='threads', help="Number of torch threads to use.")
+    parser.add_argument("--threads", default=default_pytorch_threads, type=int, dest='threads', help="Number of torch threads to use.")
     parser.add_argument("--seed", default=42, type=int, dest='seed', help="torch seed to use.")
     parser.add_argument("--smart-fen-skipping", default=True, type=str2bool, dest='smart_fen_skipping', help="If used then no smart fen skipping will be done. By default smart fen skipping is done.")
     parser.add_argument("--wld-fen-skipping", default=True, type=str2bool, dest='wld_fen_skipping', help="If used then no wld fen skipping will be done. By default wld fen skipping is done.")
     parser.add_argument("--random-fen-skipping", default=3, type=int, dest='random_fen_skipping', help="skip fens randomly on average random_fen_skipping before using one.")
     parser.add_argument("--start-from-model", default=None, type=str, dest='start_from_model', help="Initializes training using the weights from the given .pt model")
     parser.add_argument("--start-from-experiment", default=None, type=str, dest='start_from_experiment', help="Initializes training using the best network from a given experiment (by name). Uses best net from ordo, fallbacks to last.")
-    parser.add_argument("--gpus", type=str, dest='gpus', default='0')
-    parser.add_argument("--runs-per-gpu", type=int, dest='runs_per_gpu', default=1)
+    parser.add_argument("--gpus", type=str, dest='gpus', default='0', help="a GPU ID or a list of GPU IDs.")
+    parser.add_argument("--runs-per-gpu", type=int, dest='runs_per_gpu', default=1, help="To increase the load on strong GPUs run more than one repetition of this experiment and reduce net variance.")
     parser.add_argument("--features", type=str, default='HalfKAv2_hm^', help="The feature set to use") # TODO can this be made a default based on the nnue-pytorch-branch specified?
     parser.add_argument("--max_epoch", type=int, default=400, help="Number of epochs to train for.")
     parser.add_argument("--network-save-period", default=20, dest='network_save_period', help="Number of epochs between network snapshots. None to disable.")
@@ -1473,22 +1476,22 @@ def parse_cli_args():
     parser.add_argument("--engine-base-branch", type=str, default='official-stockfish/Stockfish/master', dest='engine_base_branch', help="Path to the commit/branch to use for the engine baseline.")
     parser.add_argument("--engine-test-branch", type=str, default='official-stockfish/Stockfish/master', dest='engine_test_branch', help="Path to the commit/branch to use for the engine being tested.")
     parser.add_argument("--nnue-pytorch-branch", type=str, default='glinscott/nnue-pytorch/master', dest='nnue_pytorch_branch', help="Path to the commit/branch to use for the trainer being tested.")
-    parser.add_argument("--build-engine-arch", type=str, default='x86-64-modern', dest='build_engine_arch', help="ARCH to use for engine compilation")
-    parser.add_argument("--build-threads", type=int, default=1, dest='build_threads', help="Number of threads to use for compilation")
+    parser.add_argument("--build-engine-arch", type=str, default='x86-64-modern', dest='build_engine_arch', help="ARCH to use for engine compilation, e.g. x86-64-avx2 for recent hardware")
+    parser.add_argument("--build-threads", type=int, default=8, dest='build_threads', help="Number of threads to use for compilation")
     parser.add_argument("--fail-on-experiment-exists", type=str2bool, default=True, dest='fail_on_experiment_exists', help="By default an experiment must be created in an empty directory. Should only be used for debugging.")
     parser.add_argument("--epoch-size", type=int, default=100000000, dest='epoch_size', help="Number of positions per epoch.")
     parser.add_argument("--validation-size", type=int, default=1000000, dest='validation_size', help="Number of positions per validation step.")
     parser.add_argument("--tui", type=str2bool, default=True, dest='tui', help="Whether to show a nice TUI.")
     parser.add_argument("--do-network-testing", type=str2bool, default=True, dest='do_network_testing', help="Whether to test networks as they are generated.")
     parser.add_argument("--do-network-training", type=str2bool, default=True, dest='do_network_training', help="Whether to train networks.")
-    parser.add_argument("--network-testing-threads", type=int, default=1, dest='network_testing_threads', help="Number of threads to use for network testing.")
+    parser.add_argument("--network-testing-threads", type=int, default=default_testing_threads, dest='network_testing_threads', help="Number of threads to use for network testing. By default the available number of threads - minus data loader and pytorch threads. The optimal value might depend on the --threads, --num-workers and other machine load.")
     parser.add_argument("--network-testing-explore-factor", type=float, default=1.5, dest='network_testing_explore_factor', help="Elo error estimates are multiplied by this amount to determine testing candidates.")
     parser.add_argument("--network-testing-book", type=str, default='https://github.com/official-stockfish/books/raw/master/UHO_XXL_+0.90_+1.19.epd.zip', dest='network_testing_book', help="Path to a suitable book, or suitable link see https://github.com/official-stockfish/books")
     parser.add_argument("--network-testing-time-per-move", type=float, default=None, dest='network_testing_time_per_move', help="Number of seconds per game")
     parser.add_argument("--network-testing-time-increment-per-move", type=float, default=None, dest='network_testing_time_increment_per_move', help="Number of seconds added to clock per move")
     parser.add_argument("--network-testing-nodes-per-move", type=int, default=None, dest='network_testing_nodes_per_move', help="Number of nodes per move to use for testing. Overrides time control. Should be used ove time control for better consistency.")
     parser.add_argument("--network-testing-hash-mb", type=int, default=8, dest='network_testing_hash_mb', help="Number of MB of memory to use for hash allocation for each engine being tested.")
-    parser.add_argument("--network-testing-games-per-round", type=int, default=200, dest='network_testing_games_per_round', help="Number of games per round to use. Essentially a testing batch size.")
+    parser.add_argument("--network-testing-games-per-round", type=int, default=20 * default_testing_threads, dest='network_testing_games_per_round', help="Number of games per round to use. Essentially a testing batch size. By default uses larger batches with larger --network-testing-threads")
     parser.add_argument("--resume-training", type=str2bool, default=False, dest='resume_training', help="Attempts to resume each run from its latest checkpoint.")
     args = parser.parse_args()
 
