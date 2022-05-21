@@ -509,6 +509,8 @@ class TrainingRun(Thread):
 
         cmd = [sys.executable, 'train.py'] + self._get_stringified_args()
         LOGGER.info(f'Running training with command: {cmd}')
+        LOGGER.info(f'Also known as: {" ".join(cmd)}')
+        LOGGER.info(f'Running in working directory: {self._nnue_pytorch_directory}')
         self._process = subprocess.Popen(
             cmd,
             cwd=self._nnue_pytorch_directory,
@@ -1029,6 +1031,8 @@ class NetworkTesting(Thread):
 
         cmd = [sys.executable, 'run_games.py'] + self._get_stringified_args()
         LOGGER.info(f'Running network testing with command: {cmd}')
+        LOGGER.info(f'Also known as: {" ".join(cmd)}')
+        LOGGER.info(f'Running in working directory: {self._nnue_pytorch_directory}')
         self._process = subprocess.Popen(
             cmd,
             cwd=self._nnue_pytorch_directory,
@@ -1460,7 +1464,7 @@ def parse_cli_args():
     parser.add_argument("--start-from-experiment", default=None, type=str, dest='start_from_experiment', help="Initializes training using the best network from a given experiment (by name). Uses best net from ordo, fallbacks to last.")
     parser.add_argument("--gpus", type=str, dest='gpus', default='0')
     parser.add_argument("--runs-per-gpu", type=int, dest='runs_per_gpu', default=1)
-    parser.add_argument("--features", type=str, help="The feature set to use")
+    parser.add_argument("--features", type=str, default='HalfKAv2_hm^', help="The feature set to use") # TODO can this be made a default based on the nnue-pytorch-branch specified?
     parser.add_argument("--max_epoch", type=int, default=400, help="Number of epochs to train for.")
     parser.add_argument("--network-save-period", default=20, dest='network_save_period', help="Number of epochs between network snapshots. None to disable.")
     parser.add_argument("--save-last-network", default=True, dest='save_last_network', help="Whether to always save the last produced network.")
@@ -1629,6 +1633,11 @@ def main():
     LOGGER.info('Initializing...')
 
     args = parse_cli_args()
+
+    # TODO, should be automatic if possible
+    if not args.features:
+       LOGGER.error(f'Features not specified, use the option --features=...')
+       return
 
     # if we ask to resume don't fail on existing directory
     if args.resume_training:
