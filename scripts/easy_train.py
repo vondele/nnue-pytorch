@@ -1479,7 +1479,7 @@ def parse_cli_args():
     parser.add_argument("--do-network-training", type=str2bool, default=True, dest='do_network_training', help="Whether to train networks.")
     parser.add_argument("--network-testing-threads", type=int, default=1, dest='network_testing_threads', help="Number of threads to use for network testing.")
     parser.add_argument("--network-testing-explore-factor", type=float, default=1.5, dest='network_testing_explore_factor', help="Elo error estimates are multiplied by this amount to determine testing candidates.")
-    parser.add_argument("--network-testing-book", type=str, default='./noob_3moves.epd', dest='network_testing_book', help="Path to a suitable book, see https://github.com/official-stockfish/books")
+    parser.add_argument("--network-testing-book", type=str, default='https://github.com/official-stockfish/books/raw/master/UHO_XXL_+0.90_+1.19.epd.zip', dest='network_testing_book', help="Path to a suitable book, or suitable link see https://github.com/official-stockfish/books")
     parser.add_argument("--network-testing-time-per-move", type=float, default=None, dest='network_testing_time_per_move', help="Number of seconds per game")
     parser.add_argument("--network-testing-time-increment-per-move", type=float, default=None, dest='network_testing_time_increment_per_move', help="Number of seconds added to clock per move")
     parser.add_argument("--network-testing-nodes-per-move", type=int, default=None, dest='network_testing_nodes_per_move', help="Number of nodes per move to use for testing. Overrides time control. Should be used ove time control for better consistency.")
