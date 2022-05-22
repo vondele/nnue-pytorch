@@ -1482,7 +1482,7 @@ def parse_cli_args():
     parser.add_argument("--engine-test-branch", type=str, default='official-stockfish/Stockfish/master', dest='engine_test_branch', help="Path to the commit/branch to use for the engine being tested.")
     parser.add_argument("--nnue-pytorch-branch", type=str, default='glinscott/nnue-pytorch/master', dest='nnue_pytorch_branch', help="Path to the commit/branch to use for the trainer being tested.")
     parser.add_argument("--build-engine-arch", type=str, default='x86-64-modern', dest='build_engine_arch', help="ARCH to use for engine compilation, e.g. x86-64-avx2 for recent hardware")
-    parser.add_argument("--build-threads", type=int, default=8, dest='build_threads', help="Number of threads to use for compilation")
+    parser.add_argument("--build-threads", type=int, default=max(1, os.cpu_count() // 2), dest='build_threads', help="Number of threads to use for compilation. Default half of available.")
     parser.add_argument("--fail-on-experiment-exists", type=str2bool, default=True, dest='fail_on_experiment_exists', help="By default an experiment must be created in an empty directory. Should only be used for debugging.")
     parser.add_argument("--epoch-size", type=int, default=100000000, dest='epoch_size', help="Number of positions per epoch.")
     parser.add_argument("--validation-size", type=int, default=1000000, dest='validation_size', help="Number of positions per validation step.")
