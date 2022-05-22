@@ -920,7 +920,7 @@ class NetworkTesting(Thread):
         num_parallel_games=4,
         explore_factor=1.5,
         book_file_path='',
-        time_per_move=None,
+        time_per_game=None,
         time_increment_per_move=None,
         nodes_per_move=1000,
         hash=8,
@@ -940,7 +940,7 @@ class NetworkTesting(Thread):
         self._num_parallel_games = num_parallel_games
         self._explore_factor = explore_factor
         self._book_file_path = os.path.abspath(book_file_path)
-        self._time_per_move = time_per_move
+        self._time_per_game = time_per_game
         self._time_increment_per_move = time_increment_per_move
         self._nodes_per_move = nodes_per_move
         self._hash = hash
@@ -977,8 +977,8 @@ class NetworkTesting(Thread):
             f'--features={self._features}',
         ]
 
-        if self._time_per_move:
-            args.append(f'--time_per_move={self._time_per_move}')
+        if self._time_per_game:
+            args.append(f'--time_per_game={self._time_per_game}')
 
         if self._time_increment_per_move:
             args.append(f'--time_increment_per_move={self._time_increment_per_move}')
@@ -1492,7 +1492,7 @@ def parse_cli_args():
     parser.add_argument("--network-testing-threads", type=int, default=default_testing_threads, dest='network_testing_threads', help="Number of threads to use for network testing. By default the available number of threads - minus data loader and pytorch threads. The optimal value might depend on the --threads, --num-workers and other machine load.")
     parser.add_argument("--network-testing-explore-factor", type=float, default=1.5, dest='network_testing_explore_factor', help="Elo error estimates are multiplied by this amount to determine testing candidates.")
     parser.add_argument("--network-testing-book", type=str, default='https://github.com/official-stockfish/books/raw/master/UHO_XXL_+0.90_+1.19.epd.zip', dest='network_testing_book', help="Path to a suitable book, or suitable link see https://github.com/official-stockfish/books")
-    parser.add_argument("--network-testing-time-per-move", type=float, default=None, dest='network_testing_time_per_move', help="Number of seconds per game")
+    parser.add_argument("--network-testing-time-per-game", type=float, default=None, dest='network_testing_time_per_game', help="Number of seconds per game")
     parser.add_argument("--network-testing-time-increment-per-move", type=float, default=None, dest='network_testing_time_increment_per_move', help="Number of seconds added to clock per move")
     parser.add_argument("--network-testing-nodes-per-move", type=int, default=None, dest='network_testing_nodes_per_move', help="Number of nodes per move to use for testing. Overrides time control. Should be used ove time control for better consistency.")
     parser.add_argument("--network-testing-hash-mb", type=int, default=8, dest='network_testing_hash_mb', help="Number of MB of memory to use for hash allocation for each engine being tested.")
@@ -1521,7 +1521,7 @@ def parse_cli_args():
     if not args.nnue_pytorch_branch or args.nnue_pytorch_branch.count('/') != 2:
         raise Exception(f'Invalid test trainer repo path: {args.nnue_pytorch_branch}')
 
-    if not args.network_testing_time_per_move and not args.network_testing_nodes_per_move:
+    if not args.network_testing_time_per_game and not args.network_testing_nodes_per_move:
         args.network_testing_nodes_per_move=25000
         LOGGER.info(f'No time control specified. Using a default {args.network_testing_nodes_per_move} nodes per move')
 
@@ -1781,7 +1781,7 @@ def main():
         num_parallel_games=args.network_testing_threads,
         explore_factor=args.network_testing_explore_factor,
         book_file_path=args.network_testing_book,
-        time_per_move=args.network_testing_time_per_move,
+        time_per_game=args.network_testing_time_per_game,
         time_increment_per_move=args.network_testing_time_increment_per_move,
         nodes_per_move=args.network_testing_nodes_per_move,
         hash=args.network_testing_hash_mb,

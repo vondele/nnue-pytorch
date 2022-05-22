@@ -10,15 +10,15 @@ import threading
 from pathlib import Path, PurePath
 
 class GameParams:
-    def __init__(self, hash, threads, games_per_round, time_per_move=None, time_increment_per_move=None, nodes_per_move=None):
+    def __init__(self, hash, threads, games_per_round, time_per_game=None, time_increment_per_move=None, nodes_per_move=None):
         self.hash = hash
         self.threads = threads
         self.games_per_round = games_per_round
-        self.time_per_move = time_per_move
+        self.time_per_game = time_per_game
         self.time_increment_per_move = time_increment_per_move
         self.nodes_per_move = nodes_per_move
 
-        if not time_per_move and not time_increment_per_move and not nodes_per_move:
+        if not time_per_game and not time_increment_per_move and not nodes_per_move:
             raise Exception('Invalid TC specification.')
 
     def get_all_params(self):
@@ -38,7 +38,7 @@ class GameParams:
             ]
         else:
             inc = self.time_increment_per_move or 0
-            params += [f'tc={self.time_per_move}+{inc}']
+            params += [f'tc={self.time_per_game}+{inc}']
 
         params += ['-games', f'{self.games_per_round}']
 
@@ -312,7 +312,7 @@ def main():
         help="Path to a suitable book, see https://github.com/official-stockfish/books",
     )
     parser.add_argument(
-        "--time_per_move",
+        "--time_per_game",
         type=float,
         default=4.0
     )
@@ -376,7 +376,7 @@ def main():
             args.book_file_name,
             args.concurrency,
             args.features,
-            GameParams(args.hash, args.threads, args.games_per_round, args.time_per_move, args.time_increment_per_move, args.nodes_per_move)
+            GameParams(args.hash, args.threads, args.games_per_round, args.time_per_game, args.time_increment_per_move, args.nodes_per_move)
         )
 
 
