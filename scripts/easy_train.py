@@ -1469,7 +1469,7 @@ def parse_cli_args():
     parser.add_argument("--random-fen-skipping", default=3, type=int, dest='random_fen_skipping', help="skip fens randomly on average random_fen_skipping before using one.")
     parser.add_argument("--start-from-model", default=None, type=str, dest='start_from_model', help="Initializes training using the weights from the given .pt .ckpt .nnue model")
     parser.add_argument("--start-from-experiment", default=None, type=str, dest='start_from_experiment', help="Initializes training using the best network from a given experiment (by name). Uses best net from ordo, fallbacks to last.")
-    parser.add_argument("--start-from-stockfish-net", default=False, type=str2bool, dest='start_from_stockfish_net', help="Initializes training using the weights from the .nnue associated with --engine-test-branch")
+    parser.add_argument("--start-from-engine-test-net", default=False, type=str2bool, dest='start_from_engine_test_net', help="Initializes training using the weights from the .nnue associated with --engine-test-branch")
     parser.add_argument("--gpus", type=str, dest='gpus', default='0', help="a GPU ID or a list of GPU IDs.")
     parser.add_argument("--runs-per-gpu", type=int, dest='runs_per_gpu', default=1, help="To increase the load on strong GPUs run more than one repetition of this experiment and reduce net variance.")
     parser.add_argument("--features", type=str, default='HalfKAv2_hm^', help="The feature set to use") # TODO can this be made a default based on the nnue-pytorch-branch specified?
@@ -1525,11 +1525,11 @@ def parse_cli_args():
         args.network_testing_nodes_per_move=25000
         LOGGER.info(f'No time control specified. Using a default {args.network_testing_nodes_per_move} nodes per move')
 
-    if [args.start_from_model, args.start_from_stockfish_net, args.start_from_experiment].count(True) > 1:
-        raise Exception('Only one of --start-from-model, --start-from-stockfish-net, and --start-from-experiment can be specified at a time.')
+    if [args.start_from_model, args.start_from_engine_test_net, args.start_from_experiment].count(True) > 1:
+        raise Exception('Only one of --start-from-model, --start-from-engine-test-net, and --start-from-experiment can be specified at a time.')
 
-    if args.start_from_stockfish_net and not args.engine_test_branch:
-        raise Exception('--start-from-stockfish-net but --engine-test-branch not given')
+    if args.start_from_engine_test_net and not args.engine_test_branch:
+        raise Exception('--start-from-engine-test-net but --engine-test-branch not given')
 
     if args.start_from_experiment and not args.start_from_experiment.startswith('experiment_'):
         args.start_from_experiment = 'experiment_' + args.start_from_experiment
@@ -1713,7 +1713,7 @@ def main():
     #     tmp/ordo
 
     start_model = None
-    if args.start_from_stockfish_net:
+    if args.start_from_engine_test_net:
        args.start_from_model = str(next(Path(os.path.join(stockfish_test_directory,"src/")).rglob("*.nnue")))
 
     if args.start_from_model:
