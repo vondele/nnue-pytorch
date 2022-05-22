@@ -866,8 +866,8 @@ class CChessCliRunningTestEntry:
         self._run_id = int(fields[1])
         self._epoch = int(fields[2])
         self._losses = int(fields[3]) # from base perspective so reversed
-        self._draws = int(fields[4])
-        self._wins = int(fields[5])
+        self._wins = int(fields[4])
+        self._draws = int(fields[5])
 
     @property
     def run_id(self):
