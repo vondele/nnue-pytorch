@@ -55,8 +55,8 @@ def convert_ckpt(root_dir,features):
     # lets move the .nnue files a bit up in the tree, and get rid of the = sign.
     # run96/run0/default/version_0/checkpoints/epoch=3.ckpt -> run96/run0/nn-epoch3.nnue
     for ckpt in ckpts:
-        nnue_file_name = re.sub("default/version_[0-9]+/checkpoints/", "", ckpt) # for older pytorch lightning
-        nnue_file_name = re.sub("lightning_logs/version_[0-9]+/checkpoints/", "", nnue_file_name) # for newer pytorch lightning
+        nnue_file_name = re.sub("default[/\\\\]version_[0-9]+[/\\\\]checkpoints[/\\\\]", "", ckpt) # for older pytorch lightning
+        nnue_file_name = re.sub("lightning_logs[/\\\\]version_[0-9]+[/\\\\]checkpoints[/\\\\]", "", nnue_file_name) # for newer pytorch lightning
         nnue_file_name = re.sub(r"epoch\=([0-9]+).*\.ckpt", r"nn-epoch\1.nnue", nnue_file_name)
         if not os.path.exists(nnue_file_name) and os.path.exists(ckpt):
             with subprocess.Popen([sys.executable, 'serialize.py', ckpt, nnue_file_name, f'--features={features}']) as process:
