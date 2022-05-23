@@ -331,6 +331,7 @@ def raise_scheduled_exit_signal_handler(signum, frame):
     # This is in case we catch it in some `except:` block
     signal.alarm(5)
 
+    LOGGER.info(f'Raising ScheduledExit for scheduled exit.')
     raise ScheduledExit('Scheduled exit.')
 
 # Makes the ScheduledExit exception be thrown in the main thread after
