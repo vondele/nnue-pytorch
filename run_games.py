@@ -214,28 +214,31 @@ def run_approximate_ordo(root_dir):
     entries = dict()
     white = None
     black = None
-    with open(pgn_file_name, 'r', encoding='utf-8') as pgn_file:
-        for line in pgn_file:
-            line = line.strip()
-            if line.startswith('[White'):
-                white = line[8:-2]
-            elif line.startswith('[Black'):
-                black = line[8:-2]
-            elif line.startswith('[Result') and white is not None and black is not None:
-                result_str = line[9:-2]
-                if white not in entries:
-                    entries[white] = EngineResults(white)
-                if black not in entries:
-                    entries[black] = EngineResults(black)
-                if result_str == '1-0':
-                    entries[white].add_wins(1)
-                    entries[black].add_losses(1)
-                elif result_str == '0-1':
-                    entries[white].add_losses(1)
-                    entries[black].add_wins(1)
-                if result_str == '1/2-1/2':
-                    entries[white].add_draws(1)
-                    entries[black].add_draws(1)
+    try:
+        with open(pgn_file_name, 'r', encoding='utf-8') as pgn_file:
+            for line in pgn_file:
+                line = line.strip()
+                if line.startswith('[White'):
+                    white = line[8:-2]
+                elif line.startswith('[Black'):
+                    black = line[8:-2]
+                elif line.startswith('[Result') and white is not None and black is not None:
+                    result_str = line[9:-2]
+                    if white not in entries:
+                        entries[white] = EngineResults(white)
+                    if black not in entries:
+                        entries[black] = EngineResults(black)
+                    if result_str == '1-0':
+                        entries[white].add_wins(1)
+                        entries[black].add_losses(1)
+                    elif result_str == '0-1':
+                        entries[white].add_losses(1)
+                        entries[black].add_wins(1)
+                    if result_str == '1/2-1/2':
+                        entries[white].add_draws(1)
+                        entries[black].add_draws(1)
+    except:
+        return
 
     entries_ordered = sorted(entries.values(), key=lambda x:0 if x.name == 'master' else -x.elo)
 
