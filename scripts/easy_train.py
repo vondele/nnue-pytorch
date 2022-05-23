@@ -1142,6 +1142,8 @@ class NetworkTesting(Thread):
         self._has_finished = False # currently never finishes
         self._has_started = False
 
+        self._mutex = Lock()
+
     def _get_stringified_args(self):
         args = [
             self._root_dir,
@@ -1174,36 +1176,40 @@ class NetworkTesting(Thread):
         return args
 
     def get_status_string(self):
-        cpu_usage = RESOURCE_MONITOR.resources.cpu_usage
-        if not self._active:
-            return 'Network testing inactive.'
-        elif self._has_finished:
-            return 'Network testing finished.'
-        elif not self._has_started:
-            return 'Starting testing process...'
-        elif not self._running:
-            lines = ['Network testing has exited unexpectedly.']
-            if self._error:
-                lines.append(f'Error: {self._error}')
-            return '\n'.join(lines)
-        elif self._current_convert is not None:
-            lines = [
-                f'Converting network...',
-                f'Run  : {self._current_convert[0]}',
-                f'Epoch: {self._current_convert[1]}'
-            ]
-            return '\n'.join(lines)
-        elif self._current_test is not None:
-            perf_pct = int(round(self._current_test.performance * 100))
-            lines = [
-                f'CPU load: {cpu_usage * 100:0.1f}%',
-                f'Testing run {self._current_test.run_id} epoch {self._current_test.epoch}',
-                f'+{self._current_test.wins}={self._current_test.draws}-{self._current_test.losses} [{perf_pct:0.1f}%] ({self._current_test.total_games}/{self._games_per_round})',
-                f'{self._current_test.elo:0.1f}±{self._current_test.elo_error_95:0.1f} Elo'
-            ]
-            return '\n'.join(lines)
-        else:
-            return 'Waiting for networks...'
+        self._mutex.acquire()
+        try:
+            if not self._active:
+                return 'Network testing inactive.'
+            elif self._has_finished:
+                return 'Network testing finished.'
+            elif not self._has_started:
+                return 'Starting testing process...'
+            elif not self._running:
+                lines = ['Network testing has exited unexpectedly.']
+                if self._error:
+                    lines.append(f'Error: {self._error}')
+                return '\n'.join(lines)
+            elif self._current_convert is not None:
+                lines = [
+                    f'Converting network...',
+                    f'Run  : {self._current_convert[0]}',
+                    f'Epoch: {self._current_convert[1]}'
+                ]
+                return '\n'.join(lines)
+            elif self._current_test is not None:
+                perf_pct = int(round(self._current_test.performance * 100))
+                cpu_usage = RESOURCE_MONITOR.resources.cpu_usage
+                lines = [
+                    f'CPU load: {cpu_usage * 100:0.1f}%',
+                    f'Testing run {self._current_test.run_id} epoch {self._current_test.epoch}',
+                    f'+{self._current_test.wins}={self._current_test.draws}-{self._current_test.losses} [{perf_pct:0.1f}%] ({self._current_test.total_games}/{self._games_per_round})',
+                    f'{self._current_test.elo:0.1f}±{self._current_test.elo_error_95:0.1f} Elo'
+                ]
+                return '\n'.join(lines)
+            else:
+                return 'Waiting for networks...'
+        finally:
+            self._mutex.release()
 
     def run(self):
         if not self._active:
@@ -1232,34 +1238,39 @@ class NetworkTesting(Thread):
                 if not self._running:
                     break
                 line = reader.readline().strip()
-                if not line.startswith('Score of'):
-                   LOGGER.info(line)
-                if line.startswith('Finished running ordo.'):
-                    self._update_results_from_ordo_file(self._get_ordo_file_path())
-                elif line.startswith('Score of'):
-                    try:
-                        self._current_test = CChessCliRunningTestEntry(line=line)
-                        if self._current_test.total_games % 100 == 0:
-                            LOGGER.info(self.get_status_string())
-                        self._current_convert = None
-                    except:
-                        self._current_test = None
-                elif line.startswith('Converting'):
-                    fields = OrdoEntry.NET_PATTERN.search(line)
-                    try:
-                        self._current_convert = (fields[1], fields[2])
-                        self._current_test = None
-                        LOGGER.info(self.get_status_string())
-                    except:
-                        self._current_convert = None
-                elif line.startswith('Error running match!'):
-                    self._process.terminate()
-                    self._error = 'Error running matches.'
-                    break
-                else:
-                    self._current_test = None
 
-                self._has_started = True
+                self._mutex.acquire()
+                try:
+                    if not line.startswith('Score of'):
+                       LOGGER.info(line)
+                    if line.startswith('Finished running ordo.'):
+                        self._update_results_from_ordo_file(self._get_ordo_file_path())
+                    elif line.startswith('Score of'):
+                        try:
+                            self._current_test = CChessCliRunningTestEntry(line=line)
+                            if self._current_test.total_games % 100 == 0:
+                                LOGGER.info(self.get_status_string())
+                            self._current_convert = None
+                        except:
+                            self._current_test = None
+                    elif line.startswith('Converting'):
+                        fields = OrdoEntry.NET_PATTERN.search(line)
+                        try:
+                            self._current_convert = (fields[1], fields[2])
+                            self._current_test = None
+                            LOGGER.info(self.get_status_string())
+                        except:
+                            self._current_convert = None
+                    elif line.startswith('Error running match!'):
+                        self._process.terminate()
+                        self._error = 'Error running matches.'
+                        break
+                    else:
+                        self._current_test = None
+
+                    self._has_started = True
+                finally:
+                    self._mutex.release()
         except:
             self._process.terminate()
             self._process.wait()
