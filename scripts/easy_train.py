@@ -1543,7 +1543,7 @@ def parse_cli_args():
 
     return args
 
-def do_bookkeeping(directory, args):
+def log_args(directory, args):
     os.makedirs(directory, exist_ok=True)
 
     args_dump_file_path = os.path.join(directory, 'args_dump.txt')
@@ -1683,10 +1683,10 @@ def main():
     stockfish_base_directory = os.path.join(experiment_directory, 'stockfish_base')
     stockfish_test_directory = os.path.join(experiment_directory, 'stockfish_test')
     nnue_pytorch_directory = os.path.join(experiment_directory, 'nnue-pytorch')
-    bookkeeping_directory = os.path.join(experiment_directory, 'bookkeeping')
+    logging_directory = os.path.join(experiment_directory, 'logging')
     start_model_directory = os.path.join(experiment_directory, 'start_models')
 
-    do_bookkeeping(bookkeeping_directory, args)
+    log_args(logging_directory, args)
 
     if not args.do_approximate_ordo:
         setup_ordo(ordo_directory)
@@ -1724,7 +1724,7 @@ def main():
     #     tmp/experiments/experiment_{name}/stockfish_base
     #     tmp/experiments/experiment_{name}/stockfish_test
     #     tmp/experiments/experiment_{name}/nnue-pytorch
-    #     tmp/experiments/experiment_{name}/bookkeeping
+    #     tmp/experiments/experiment_{name}/logging
     #     tmp/c-chess-cli
     #     tmp/ordo
 
