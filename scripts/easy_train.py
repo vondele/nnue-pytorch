@@ -283,6 +283,10 @@ def raise_scheduled_exit_signal_handler(signum, frame):
     global CURRENT_SCHEDULED_EXIT_TIME
     CURRENT_SCHEDULED_EXIT_TIME = None
 
+    # Retry in 5 seconds
+    # This is in case we catch it in some `except:` block
+    signal.alarm(5)
+
     raise ScheduledExit('Scheduled exit.')
 
 def schedule_exit_prioritise_earlier(timeout_seconds):
