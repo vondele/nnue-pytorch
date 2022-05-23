@@ -100,10 +100,14 @@ def validate_gcc():
     try:
         out = run_for_version('gcc')
         parts = out.split('\n')[0].split()
-        version_str = parts[2] # sometimes there are trailing strings in the version number
-        major_version = int(version_str.split('.')[0])
-        minor_version = int(version_str.split('.')[1])
-        success = (major_version, minor_version) >= (9, 2)
+        for part in parts:
+            try:
+                version_str = part # sometimes there are trailing strings in the version number
+                major_version = int(version_str.split('.')[0])
+                minor_version = int(version_str.split('.')[1])
+                success = (major_version, minor_version) >= (9, 2)
+            except:
+                continue
         if success:
             LOGGER.info(f'Found gcc executable version {version_str}. OK.')
         else:
