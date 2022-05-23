@@ -365,6 +365,8 @@ class SystemResourcesMonitor(Thread):
 
         self._running = True
         self._update()
+
+        self.setDaemon(True)
         self.start()
 
     def _update(self):
@@ -1934,7 +1936,4 @@ def main():
         sys.exit(3)
 
 if __name__ == '__main__':
-    try:
-        main()
-    finally:
-        RESOURCE_MONITOR.stop()
+    main()
