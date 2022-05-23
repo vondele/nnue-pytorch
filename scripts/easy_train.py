@@ -278,10 +278,13 @@ if %ERRORLEVEL%==0 (
 class ScheduledExit(Exception):
     pass
 
+CURRENT_SCHEDULED_EXIT_TIME = None
 def raise_scheduled_exit_signal_handler(signum, frame):
+    global CURRENT_SCHEDULED_EXIT_TIME
+    CURRENT_SCHEDULED_EXIT_TIME = None
+
     raise ScheduledExit('Scheduled exit.')
 
-CURRENT_SCHEDULED_EXIT_TIME = None
 def schedule_exit_prioritise_earlier(timeout_seconds):
     global CURRENT_SCHEDULED_EXIT_TIME
     now = datetime.now()
