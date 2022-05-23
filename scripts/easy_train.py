@@ -1478,7 +1478,7 @@ def parse_cli_args():
     parser.add_argument("--start-from-engine-test-net", default=False, type=str2bool, dest='start_from_engine_test_net', help="Initializes training using the weights from the .nnue associated with --engine-test-branch")
     parser.add_argument("--gpus", type=str, dest='gpus', default='0', help="a GPU ID or a list of GPU IDs.")
     parser.add_argument("--runs-per-gpu", type=int, dest='runs_per_gpu', default=1, help="To increase the load on strong GPUs run more than one repetition of this experiment and reduce net variance.")
-    parser.add_argument("--features", type=str, default='HalfKAv2_hm^', help="The feature set to use") # TODO can this be made a default based on the nnue-pytorch-branch specified?
+    parser.add_argument("--features", type=str, default=None, help="The feature set to use. If not specified then will be inferred from the downloaded nnue-pytorch repo") # TODO can this be made a default based on the nnue-pytorch-branch specified?
     parser.add_argument("--max_epoch", type=int, default=400, help="Number of epochs to train for.")
     parser.add_argument("--network-save-period", default=20, dest='network_save_period', help="Number of epochs between network snapshots. None to disable.")
     parser.add_argument("--save-last-network", default=True, dest='save_last_network', help="Whether to always save the last produced network.")
@@ -1647,15 +1647,17 @@ def prepare_start_model_from_experiment(directory, experiment_path, run_id, nnue
         raise Exception('Could not find any viable .ckpt nor .nnue files in the start experiment.')
     return prepare_start_model(directory, best_model, run_id, nnue_pytorch_directory, features)
 
+def get_default_feature_set_from_nnue_pytorch(nnue_pytorch_directory):
+    with open(os.path.join(nnue_pytorch_directory, 'features.py'), 'r') as features_file:
+        for line in features_file:
+            line = line.strip()
+            if line.startswith('_default_feature_set_name'):
+                return line.split()[-1][1:-1]
+
 def main():
     LOGGER.info('Initializing...')
 
     args = parse_cli_args()
-
-    # TODO, should be automatic if possible
-    if not args.features:
-       LOGGER.error(f'Features not specified, use the option --features=...')
-       return
 
     # if we ask to resume don't fail on existing directory
     if args.resume_training:
@@ -1708,6 +1710,9 @@ def main():
     nnue_pytorch_repo = '/'.join(args.nnue_pytorch_branch.split('/')[:2])
     nnue_pytorch_branch_or_commit = args.nnue_pytorch_branch.split('/')[2]
     setup_nnue_pytorch(nnue_pytorch_directory, nnue_pytorch_repo, nnue_pytorch_branch_or_commit)
+
+    if args.features is None:
+        args.features = get_default_feature_set_from_nnue_pytorch(nnue_pytorch_directory)
 
     LOGGER.info('Initialization completed.')
 
