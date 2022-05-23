@@ -7,6 +7,7 @@ import argparse
 import features
 import shutil
 import threading
+import math
 from pathlib import Path, PurePath
 
 GLOBAL_LOCK = threading.Lock()
@@ -145,6 +146,113 @@ def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfis
 
     print_atomic("Finished running match.")
 
+class EngineResults:
+    def __init__(self, name):
+        self._name = name
+        self._losses = 0
+        self._wins = 0
+        self._draws = 0
+
+    def add_wins(self, n=1):
+        self._wins += n
+
+    def add_draws(self, n=1):
+        self._draws += n
+
+    def add_losses(self, n=1):
+        self._losses += n
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def wins(self):
+        return self._wins
+
+    @property
+    def draws(self):
+        return self._draws
+
+    @property
+    def losses(self):
+        return self._losses
+
+    @property
+    def total_games(self):
+        return self._wins + self._draws + self._losses
+
+    @property
+    def points(self):
+        return self._wins + self._draws * 0.5
+
+    @property
+    def performance(self):
+        return self.points / self.total_games
+
+    def _elo(self, x):
+        epsilon = 1e-3
+        x = max(x, epsilon)
+        x = min(x, 1 - epsilon)
+        return -400 * math.log10(1 / x - 1)
+
+    @property
+    def elo(self):
+        return self._elo(self.performance)
+
+    @property
+    def elo_error_95(self):
+        return 400 / math.sqrt(self.total_games)
+
+def run_approximate_ordo(root_dir):
+    """ run an approximate ordo-like calculation on an existing pgn file """
+    """ it takes advantege of the fact that all matches are ran against master """
+    pgn_file_name = os.path.join(root_dir, "out.pgn")
+    ordo_file_name = os.path.join(root_dir, "ordo.out")
+    ordo_file_name_temp = os.path.join(root_dir, "ordo_temp.out")
+
+    entries = dict()
+    white = None
+    black = None
+    with open(pgn_file_name, 'r', encoding='utf-8') as pgn_file:
+        for line in pgn_file:
+            line = line.strip()
+            if line.startswith('[White'):
+                white = line[8:-2]
+            elif line.startswith('[Black'):
+                black = line[8:-2]
+            elif line.startswith('[Result') and white is not None and black is not None:
+                result_str = line[9:-2]
+                if white not in entries:
+                    entries[white] = EngineResults(white)
+                if black not in entries:
+                    entries[black] = EngineResults(black)
+                if result_str == '1-0':
+                    entries[white].add_wins(1)
+                    entries[black].add_losses(1)
+                elif result_str == '0-1':
+                    entries[white].add_losses(1)
+                    entries[black].add_wins(1)
+                if result_str == '1/2-1/2':
+                    entries[white].add_draws(1)
+                    entries[black].add_draws(1)
+
+    entries_ordered = sorted(entries.values(), key=lambda x:0 if x.name == 'master' else -x.elo)
+
+    with open(ordo_file_name_temp, 'w') as ordo_file:
+        ordo_file.write('\n')
+        ordo_file.write('   # PLAYER                        :  RATING  ERROR  POINTS  PLAYED   (%)\n')
+        for i, entry in enumerate(entries_ordered):
+            if entry.name == 'master':
+                ordo_file.write(f'   {i+1} {entry.name} : 0.0 ---- {entry.points:0.1f} {entry.total_games} {entry.performance*100:0.0f}\n')
+            else:
+                ordo_file.write(f'   {i+1} {entry.name} : {entry.elo:0.1f} {entry.elo_error_95:0.1f} {entry.points:0.1f} {entry.total_games} {entry.performance*100:0.0f}\n')
+        ordo_file.write('\n')
+
+    os.replace(ordo_file_name_temp, ordo_file_name)
+
+    print_atomic("Finished running ordo.")
+
 def run_ordo(root_dir, ordo_exe, concurrency):
     """ run an ordo calcuation on an existing pgn file """
     pgn_file_name = os.path.join(root_dir, "out.pgn")
@@ -172,8 +280,6 @@ def run_ordo(root_dir, ordo_exe, concurrency):
         else:
             os.replace(ordo_file_name_temp, ordo_file_name)
 
-    # Newlines make it less likely the output is on a line of the running match results
-    # Probably both threads needs some cleaner way to do I/O
     print_atomic("Finished running ordo.")
 
 def run_round(
@@ -239,10 +345,16 @@ def run_round(
         target=run_match,
         args=(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfish_base, stockfish_test, game_params)
     )
-    run_ordo_thread = threading.Thread(
-        target=run_ordo,
-        args=(root_dir, ordo_exe, concurrency)
-    )
+    if ordo_exe:
+        run_ordo_thread = threading.Thread(
+            target=run_ordo,
+            args=(root_dir, ordo_exe, concurrency)
+        )
+    else:
+        run_ordo_thread = threading.Thread(
+            target=run_approximate_ordo,
+            args=(root_dir,)
+        )
     # TODO/BUG both threads generate output, that can be corrupted, making the calling process confused
     run_match_thread.start()
     run_ordo_thread.start()
@@ -294,8 +406,8 @@ def main():
     parser.add_argument(
         "--ordo_exe",
         type=str,
-        default="./ordo",
-        help="Path to ordo, see https://github.com/michiguel/Ordo",
+        default=None,
+        help="Path to ordo, see https://github.com/michiguel/Ordo. If None then an approximate computation will be performed.",
     )
     parser.add_argument(
         "--c_chess_exe",
@@ -365,7 +477,7 @@ def main():
     if not shutil.which(stockfish_test):
        sys.exit("Stockfish test is not executable!")
 
-    if not shutil.which(args.ordo_exe):
+    if args.ordo_exe and not shutil.which(args.ordo_exe):
        sys.exit("ordo is not executable!")
 
     if not shutil.which(args.c_chess_exe):
