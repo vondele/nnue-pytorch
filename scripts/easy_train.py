@@ -316,6 +316,7 @@ def schedule_exit(timeout_seconds, errcode):
     def f():
         time.sleep(timeout_seconds)
         LOGGER.info(f'Performing a scheduled exit.')
+        # TODO: currently breaks TUI on windows and leaves the console unusable.
         os._exit(errcode)
 
     thread = Thread(target=f)
@@ -1705,12 +1706,6 @@ def parse_cli_args():
 
     if args.start_from_experiment and not args.start_from_experiment.startswith('experiment_'):
         args.start_from_experiment = 'experiment_' + args.start_from_experiment
-
-    if sys.platform == "win32":
-        if args.auto_exit_timeout or args.auto_exit_timeout_on_training_finished:
-            # TODO: Requires signal SIGALRM... Search for workaround later.
-            pass
-            #raise Exception('Scheduled auto exit on windows is not yet supported.')
 
     return args
 
