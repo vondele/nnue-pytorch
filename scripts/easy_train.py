@@ -13,6 +13,11 @@ import math
 import logging
 import time
 
+EXITCODE_OK = 0
+EXITCODE_MISSING_DEPENDENCIES = 2
+EXITCODE_TRAINING_LIKELY_NOT_FINISHED = 3
+EXITCODE_TRAINING_NOT_FINISHED = 4
+
 logging.basicConfig()
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.DEBUG)
@@ -235,7 +240,7 @@ def validate_environment_requirements():
 
 # Exit early if the requires packages have not been found
 if not validate_environment_requirements():
-    sys.exit(2)
+    sys.exit(EXITCODE_MISSING_DEPENDENCIES)
 
 # Only now import the rest of the required packages
 from asciimatics.widgets import Frame, ListBox, Layout, Divider, Text, Button, \
@@ -306,56 +311,16 @@ if %ERRORLEVEL%==0 (
         # TODO: this
         pass
 
-class ScheduledExit(Exception):
-    '''
-    This exception is raised by the scheduled exit process.
-    It is only meant to be thrown in the main thread.
-    '''
-    pass
+# Exits the process forcefully after a specified amount of seconds with a given error code
+def schedule_exit(timeout_seconds, errcode):
+    def f():
+        time.sleep(timeout_seconds)
+        LOGGER.info(f'Performing a scheduled exit.')
+        os._exit(errcode)
 
-# An implementation of a mechanism to raise an exception after
-# a specified timeout in the main thread.
-# Ideally the main thread's execution should be made in such a way that
-# this doesn't get swallowed by some generic except block.
-# The exception will however be rethrown every 5 seconds after.
-# It is expected that the application terminates some reasonable time after
-# ScheduledExit is thrown, therefore this is considered an acceptable solution.
-# TODO: Windows support (possibly by a normal timer and a different signal,
-#       could also replace the current solution)
-CURRENT_SCHEDULED_EXIT_TIME = None
-def raise_scheduled_exit_signal_handler(signum, frame):
-    global CURRENT_SCHEDULED_EXIT_TIME
-    CURRENT_SCHEDULED_EXIT_TIME = None
-
-    # Retry in 5 seconds
-    # This is in case we catch it in some `except:` block
-    signal.alarm(5)
-
-    LOGGER.info(f'Raising ScheduledExit for scheduled exit.')
-    raise ScheduledExit('Scheduled exit.')
-
-# Makes the ScheduledExit exception be thrown in the main thread after
-# the specified number of seconds pass. If there is an event already scheduled
-# then the earliest one will take precedence.
-def schedule_exit_prioritise_earlier(timeout_seconds):
-    global CURRENT_SCHEDULED_EXIT_TIME
-    now = datetime.now()
-    new_scheduled_exit_time = now - timedelta(seconds=timeout_seconds)
-    if CURRENT_SCHEDULED_EXIT_TIME is None:
-        signal.signal(signal.SIGALRM, raise_scheduled_exit_signal_handler)
-    if CURRENT_SCHEDULED_EXIT_TIME is None or CURRENT_SCHEDULED_EXIT_TIME > new_scheduled_exit_time:
-        CURRENT_SCHEDULED_EXIT_TIME = new_scheduled_exit_time
-        new_timeout = new_scheduled_exit_time - now
-        new_timeout_s = max(1, new_timeout.seconds)
-        signal.alarm(new_timeout_s)
-        LOGGER.info(f'Schedule exit after {timeout_seconds}s')
-
-# Removes all scheduled exits.
-def unschedule_exit():
-    global CURRENT_SCHEDULED_EXIT_TIME
-    if CURRENT_SCHEDULED_EXIT_TIME:
-        signal.alarm(0)
-        CURRENT_SCHEDULED_EXIT_TIME = None
+    thread = Thread(target=f)
+    thread.setDaemon(True)
+    thread.start()
 
 class DecayingRunningAverage:
     '''
@@ -1744,7 +1709,8 @@ def parse_cli_args():
     if sys.platform == "win32":
         if args.auto_exit_timeout or args.auto_exit_timeout_on_training_finished:
             # TODO: Requires signal SIGALRM... Search for workaround later.
-            raise Exception('Scheduled auto exit on windows is not yet supported.')
+            pass
+            #raise Exception('Scheduled auto exit on windows is not yet supported.')
 
     return args
 
@@ -1901,13 +1867,16 @@ def spawn_training_watcher(training_runs, exit_timeout_after_finished):
     def f():
         while True:
             finished = True
+            success = True
             for run in training_runs:
                 if run.is_running:
                     finished = False
-                    break
+                if not run.has_finished:
+                    success = False
 
             if finished:
-                schedule_exit_prioritise_earlier(exit_timeout_after_finished)
+                errcode = EXITCODE_OK if success else EXITCODE_TRAINING_NOT_FINISHED
+                schedule_exit(exit_timeout_after_finished, errcode)
                 return
 
             time.sleep(1)
@@ -2072,7 +2041,7 @@ def main():
 
     if args.auto_exit_timeout:
         timeout = parse_duration_hms_to_s(args.auto_exit_timeout)
-        schedule_exit_prioritise_earlier(timeout)
+        schedule_exit(timeout, EXITCODE_TRAINING_LIKELY_NOT_FINISHED)
 
     if args.auto_exit_timeout_on_training_finished and args.do_network_training:
         timeout = parse_duration_hms_to_s(args.auto_exit_timeout_on_training_finished)
@@ -2087,9 +2056,6 @@ def main():
             try:
                 Screen.wrapper(app, catch_interrupt=True, arguments=[last_scene, training_runs, network_testing])
                 break
-            except ScheduledExit as e:
-                LOGGER.info('Executing scheduled exit.')
-                break
             except ResizeScreenError as e:
                 last_scene = e.scene
     else:
@@ -2100,17 +2066,15 @@ def main():
                     break
                 else:
                     print('Type `quit` to stop.')
-            except ScheduledExit as e:
-                LOGGER.info('Executing scheduled exit.')
-                break
             except EOFError:
                 # For non-interactive environments
                 time.sleep(1)
 
-    unschedule_exit()
-
+    LOGGER.info('Stopping training runs.')
     for tr in training_runs:
         tr.stop()
+
+    LOGGER.info('Stopping network testing.')
     network_testing.stop()
 
     any_training_error = False
@@ -2120,7 +2084,7 @@ def main():
             break
 
     if any_training_error:
-        sys.exit(3)
+        sys.exit(EXITCODE_TRAINING_NOT_FINISHED)
 
 if __name__ == '__main__':
     main()
