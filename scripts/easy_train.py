@@ -442,6 +442,49 @@ def find_latest_checkpoint(root_dir):
 
     return str(max(ckpts, key=lambda p: p.stat().st_ctime_ns))
 
+class OrdoEntry:
+    '''
+    Represents a single entry in an ordo file.
+    Expects players to be named after network paths, if the form experiment_path/run_{}/nn-epoch{}.nnue
+    '''
+
+    NET_PATTERN = re.compile(r'.*?run_(\d+).*?nn-epoch(\d+)\.nnue')
+    def __init__(self, line=None, network_path=None, elo=None, elo_error=None, run_id=None, epoch=None):
+        if line:
+            fields = line.split()
+            self._network_path = fields[1]
+            self._elo = float(fields[3])
+            self._elo_error = float(fields[4])
+            net_parts = OrdoEntry.NET_PATTERN.search(self._network_path)
+            self._run_id = int(net_parts[1])
+            self._epoch = int(net_parts[2])
+        else:
+            self._network_path = network_path
+            self._elo = elo
+            self._elo_error = elo_error
+            self._run_id = run_id
+            self._epoch = epoch
+
+    @property
+    def network_path(self):
+        return self._network_path
+
+    @property
+    def run_id(self):
+        return self._run_id
+
+    @property
+    def epoch(self):
+        return self._epoch
+
+    @property
+    def elo(self):
+        return self._elo
+
+    @property
+    def elo_error(self):
+        return self._elo_error
+
 def find_best_checkpoint(root_dir):
     '''
     Recursively searches the specified directory the best
@@ -458,21 +501,26 @@ def find_best_checkpoint(root_dir):
     ordo_file_path = os.path.join(root_dir, 'ordo.out')
 
     with open(ordo_file_path, 'r') as ordo_file:
-        for line in ordo_file:
+        entries = []
+        lines = ordo_file.readlines()
+        for line in lines:
             if 'nn-epoch' in line:
-                # get first found
-                net_parts = OrdoEntry.NET_PATTERN.search(line)
-                run_id = int(net_parts[1])
-                epoch = int(net_parts[2])
-                for ckpt in ckpts:
-                    if f'run_{run_id}' in ckpt and f'epoch={epoch}' in ckpt:
-                        return ckpt
-                # fallback to .nnue if no checkpoint file
-                for nnue in nnues:
-                    if f'run_{run_id}' in nnue and f'nn-epoch{epoch}' in nnue:
-                        return nnue
+                try:
+                    entries.append(OrdoEntry(line=line))
+                except:
+                    pass
 
-                break
+    entries.sort(key=lambda x:-x.elo+x.elo_error)
+
+    run_id = entries[0].run_id
+    epoch = entries[0].epoch
+    for ckpt in ckpts:
+        if f'run_{run_id}' in ckpt and f'epoch={epoch}' in ckpt:
+            return ckpt
+    # fallback to .nnue if no checkpoint file
+    for nnue in nnues:
+        if f'run_{run_id}' in nnue and f'nn-epoch{epoch}' in nnue:
+            return nnue
 
     return None
 
@@ -945,49 +993,6 @@ def setup_nnue_pytorch(directory, repo, branch_or_commit):
 
     if not is_nnue_pytorch_setup(directory):
         raise Exception(f'Incorrect nnue-pytorch setup or timeout.')
-
-class OrdoEntry:
-    '''
-    Represents a single entry in an ordo file.
-    Expects players to be named after network paths, if the form experiment_path/run_{}/nn-epoch{}.nnue
-    '''
-
-    NET_PATTERN = re.compile(r'.*?run_(\d+).*?nn-epoch(\d+)\.nnue')
-    def __init__(self, line=None, network_path=None, elo=None, elo_error=None, run_id=None, epoch=None):
-        if line:
-            fields = line.split()
-            self._network_path = fields[1]
-            self._elo = float(fields[3])
-            self._elo_error = float(fields[4])
-            net_parts = OrdoEntry.NET_PATTERN.search(self._network_path)
-            self._run_id = int(net_parts[1])
-            self._epoch = int(net_parts[2])
-        else:
-            self._network_path = network_path
-            self._elo = elo
-            self._elo_error = elo_error
-            self._run_id = run_id
-            self._epoch = epoch
-
-    @property
-    def network_path(self):
-        return self._network_path
-
-    @property
-    def run_id(self):
-        return self._run_id
-
-    @property
-    def epoch(self):
-        return self._epoch
-
-    @property
-    def elo(self):
-        return self._elo
-
-    @property
-    def elo_error(self):
-        return self._elo_error
 
 class CChessCliRunningTestEntry:
     '''
