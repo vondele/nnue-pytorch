@@ -242,6 +242,8 @@ import zipfile
 import shutil
 import urllib.request
 import urllib.parse
+import signal
+from datetime import datetime, timedelta
 from tqdm.auto import tqdm
 from pathlib import Path
 
@@ -272,6 +274,32 @@ if %ERRORLEVEL%==0 (
     elif sys.platform == "linux":
         # TODO: this
         pass
+
+class ScheduledExit(Exception):
+    pass
+
+def raise_scheduled_exit_signal_handler(signum, frame):
+    raise ScheduledExit('Scheduled exit.')
+
+CURRENT_SCHEDULED_EXIT_TIME = None
+def schedule_exit_prioritise_earlier(timeout_seconds):
+    global CURRENT_SCHEDULED_EXIT_TIME
+    now = datetime.now()
+    new_scheduled_exit_time = now - timedelta(seconds=timeout_seconds)
+    if CURRENT_SCHEDULED_EXIT_TIME is None:
+        signal.signal(signal.SIGALRM, raise_scheduled_exit_signal_handler)
+    if CURRENT_SCHEDULED_EXIT_TIME is None or CURRENT_SCHEDULED_EXIT_TIME > new_scheduled_exit_time:
+        CURRENT_SCHEDULED_EXIT_TIME = new_scheduled_exit_time
+        new_timeout = new_scheduled_exit_time - now
+        new_timeout_s = max(1, new_timeout.seconds)
+        signal.alarm(new_timeout_s)
+        LOGGER.info(f'Schedule exit after {timeout_seconds}s')
+
+def unschedule_exit():
+    global CURRENT_SCHEDULED_EXIT_TIME
+    if CURRENT_SCHEDULED_EXIT_TIME:
+        signal.alarm(0)
+        CURRENT_SCHEDULED_EXIT_TIME = None
 
 class DecayingRunningAverage:
     def __init__(self, decay=0.995):
@@ -1505,6 +1533,8 @@ def parse_cli_args():
     parser.add_argument("--network-testing-games-per-round", type=int, default=20 * default_testing_threads, dest='network_testing_games_per_round', help="Number of games per round to use. Essentially a testing batch size. By default uses larger batches with larger --network-testing-threads")
     parser.add_argument("--resume-training", type=str2bool, default=True, dest='resume_training', help="Attempts to resume each run from its latest checkpoint.")
     parser.add_argument("--do-approximate-ordo", type=str2bool, default=True, dest='do_approximate_ordo', help="If true then doesn't launch ordo and instead does a fast approximate computation. Workaround for ordo memory usage issues.")
+    parser.add_argument("--auto-exit-timeout", type=str, default=None, dest='auto_exit_timeout', help="Exit timeout in format 'hh:mm:ss', 'mm:ss', or 'ss'")
+    parser.add_argument("--auto-exit-timeout-on-training-finished", type=str, default=None, dest='auto_exit_timeout_on_training_finished', help="Exit timeout after training finised in format 'hh:mm:ss', 'mm:ss', or 'ss'")
     args = parser.parse_args()
 
     if not args.training_dataset:
@@ -1540,6 +1570,11 @@ def parse_cli_args():
 
     if args.start_from_experiment and not args.start_from_experiment.startswith('experiment_'):
         args.start_from_experiment = 'experiment_' + args.start_from_experiment
+
+    if sys.platform == "win32":
+        if args.auto_exit_timeout or args.auto_exit_timeout_on_training_finished:
+            # TODO: Requires signal SIGALRM... Search for workaround later.
+            raise Exception('Scheduled auto exit on windows is not yet supported.')
 
     return args
 
@@ -1656,6 +1691,32 @@ def get_default_feature_set_from_nnue_pytorch(nnue_pytorch_directory):
                     return line.split()[-1][1:-1]
     except:
         raise Exception('Could not infer the default feature set from the nnue-pytorch installation.')
+
+def parse_duration_hms_to_s(duration_str):
+    parts = duration_str.split(':')
+    s = int(parts[-1])
+    m = 0 if len(parts) < 2 else int(parts[-2])
+    h = 0 if len(parts) < 3 else int(parts[-3])
+    return h * 3600 + m * 60 + s
+
+def spawn_training_watcher(training_runs, exit_timeout_after_finished):
+    def f():
+        while True:
+            finished = True
+            for run in training_runs:
+                if run.is_running:
+                    finished = False
+                    break
+
+            if finished:
+                schedule_exit_prioritise_earlier(exit_timeout_after_finished)
+                return
+
+            time.sleep(1)
+
+    thread = Thread(target=f)
+    thread.setDaemon(True)
+    thread.start()
 
 def main():
     LOGGER.info('Initializing...')
@@ -1813,6 +1874,14 @@ def main():
 
     network_testing.start()
 
+    if args.auto_exit_timeout:
+        timeout = parse_duration_hms_to_s(args.auto_exit_timeout)
+        schedule_exit_prioritise_earlier(timeout)
+
+    if args.auto_exit_timeout_on_training_finished and args.do_network_training:
+        timeout = parse_duration_hms_to_s(args.auto_exit_timeout_on_training_finished)
+        spawn_training_watcher(training_runs, timeout)
+
     if args.tui:
         for h in LOGGER.handlers:
             if isinstance(h, logging.StreamHandler):
@@ -1821,6 +1890,9 @@ def main():
         while True:
             try:
                 Screen.wrapper(app, catch_interrupt=True, arguments=[last_scene, training_runs, network_testing])
+                break
+            except ScheduledExit as e:
+                LOGGER.info('Executing scheduled exit.')
                 break
             except ResizeScreenError as e:
                 last_scene = e.scene
@@ -1832,9 +1904,14 @@ def main():
                     break
                 else:
                     print('Type `quit` to stop.')
+            except ScheduledExit as e:
+                LOGGER.info('Executing scheduled exit.')
+                break
             except EOFError:
                 # For non-interactive environments
                 time.sleep(1)
+
+    unschedule_exit()
 
     for tr in training_runs:
         tr.stop()
