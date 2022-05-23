@@ -1011,6 +1011,7 @@ class CChessCliRunningTestEntry:
     LINE_PATTERN = re.compile(r'Score.*?run_(\d+).*?nn-epoch(\d+)\.nnue:\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*')
     def __init__(self, line=None):
         fields = CChessCliRunningTestEntry.LINE_PATTERN.search(line)
+        self._line = line
         self._run_id = int(fields[1])
         self._epoch = int(fields[2])
         self._losses = int(fields[3]) # from base perspective so reversed
@@ -1058,6 +1059,10 @@ class CChessCliRunningTestEntry:
     @property
     def elo_error_95(self):
         return 400 / math.sqrt(self.total_games)
+
+    @property
+    def line(self):
+        return self._line
 
 
 class NetworkTesting(Thread):
@@ -1227,7 +1232,7 @@ class NetworkTesting(Thread):
                         try:
                             self._current_test = CChessCliRunningTestEntry(line=line)
                             if self._current_test.total_games % 100 == 0:
-                                LOGGER.info(self.get_status_string())
+                                LOGGER.info(self._current_test.line)
                             self._current_convert = None
                         except:
                             self._current_test = None
@@ -1236,7 +1241,7 @@ class NetworkTesting(Thread):
                         try:
                             self._current_convert = (fields[1], fields[2])
                             self._current_test = None
-                            LOGGER.info(self.get_status_string())
+                            LOGGER.info(f'Converting network epoch {self._current_convert[0]}, run id {self._current_convert[1]}')
                         except:
                             self._current_convert = None
                     elif line.startswith('Error running match!'):
