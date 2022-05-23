@@ -1924,6 +1924,15 @@ def main():
         tr.stop()
     network_testing.stop()
 
+    any_training_error = False
+    for tr in training_runs:
+        if not tr.has_finished:
+            any_training_error = True
+            break
+
+    if any_training_error:
+        sys.exit(3)
+
 if __name__ == '__main__':
     try:
         main()
