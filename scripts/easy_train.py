@@ -1503,7 +1503,7 @@ def parse_cli_args():
     parser.add_argument("--network-testing-nodes-per-move", type=int, default=None, dest='network_testing_nodes_per_move', help="Number of nodes per move to use for testing. Overrides time control. Should be used ove time control for better consistency.")
     parser.add_argument("--network-testing-hash-mb", type=int, default=8, dest='network_testing_hash_mb', help="Number of MB of memory to use for hash allocation for each engine being tested.")
     parser.add_argument("--network-testing-games-per-round", type=int, default=20 * default_testing_threads, dest='network_testing_games_per_round', help="Number of games per round to use. Essentially a testing batch size. By default uses larger batches with larger --network-testing-threads")
-    parser.add_argument("--resume-training", type=str2bool, default=False, dest='resume_training', help="Attempts to resume each run from its latest checkpoint.")
+    parser.add_argument("--resume-training", type=str2bool, default=True, dest='resume_training', help="Attempts to resume each run from its latest checkpoint.")
     parser.add_argument("--do-approximate-ordo", type=str2bool, default=True, dest='do_approximate_ordo', help="If true then doesn't launch ordo and instead does a fast approximate computation. Workaround for ordo memory usage issues.")
     args = parser.parse_args()
 
