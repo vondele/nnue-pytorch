@@ -660,6 +660,12 @@ class TrainingRun(Thread):
         return args
 
     def run(self):
+        if self._resume_training and os.path.exists(os.path.join(self._root_dir, 'training_finished')):
+            self._has_started = True
+            self._has_finished = True
+            self._running = False
+            return
+
         self._running = True
 
         cmd = [sys.executable, 'train.py'] + self._get_stringified_args()
@@ -752,8 +758,9 @@ class TrainingRun(Thread):
     def stop(self):
         self._running = False
         self.join()
-        self._process.terminate()
-        self._process.wait()
+        if self._process:
+            self._process.terminate()
+            self._process.wait()
 
     @property
     def gpu_id(self):
@@ -1377,7 +1384,7 @@ class TrainerRunsWidget(Widget):
         # TODO: Some output for the logger.
         #       Right now only the progress bar in the training run is printed occasionally.
         if run.has_finished:
-            loss = run.current_loss
+            loss = run.current_loss or 'unknown'
             return [f'  Run {run.run_id} - Completed; Loss: {loss}']
         elif not run.has_started:
             return f'  Run {run.run_id} - Starting...',

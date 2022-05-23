@@ -125,6 +125,9 @@ def main():
 
   trainer.fit(nnue, train, val)
 
+  with open(os.path.join(logdir, 'training_finished'), 'w'):
+    pass
+
 if __name__ == '__main__':
   main()
   if sys.platform == "win32":
