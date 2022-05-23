@@ -1648,11 +1648,14 @@ def prepare_start_model_from_experiment(directory, experiment_path, run_id, nnue
     return prepare_start_model(directory, best_model, run_id, nnue_pytorch_directory, features)
 
 def get_default_feature_set_from_nnue_pytorch(nnue_pytorch_directory):
-    with open(os.path.join(nnue_pytorch_directory, 'features.py'), 'r') as features_file:
-        for line in features_file:
-            line = line.strip()
-            if line.startswith('_default_feature_set_name'):
-                return line.split()[-1][1:-1]
+    try:
+        with open(os.path.join(nnue_pytorch_directory, 'features.py'), 'r') as features_file:
+            for line in features_file:
+                line = line.strip()
+                if line.startswith('_default_feature_set_name'):
+                    return line.split()[-1][1:-1]
+    except:
+        raise Exception('Could not infer the default feature set from the nnue-pytorch installation.')
 
 def main():
     LOGGER.info('Initializing...')
