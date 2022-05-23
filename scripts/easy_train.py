@@ -949,7 +949,7 @@ class NetworkTesting(Thread):
         self._nodes_per_move = nodes_per_move
         self._hash = hash
         self._games_per_round = games_per_round
-        self._ordo_exe = os.path.abspath(ordo_exe)
+        self._ordo_exe = os.path.abspath(ordo_exe) if ordo_exe else ordo_exe
         self._c_chess_cli_exe = os.path.abspath(c_chess_cli_exe)
         self._stockfish_base_exe = os.path.abspath(stockfish_base_exe)
         self._stockfish_test_exe = os.path.abspath(stockfish_test_exe)
@@ -971,7 +971,6 @@ class NetworkTesting(Thread):
             self._root_dir,
             f'--concurrency={self._num_parallel_games}',
             f'--explore_factor={self._explore_factor}',
-            f'--ordo_exe={self._ordo_exe}',
             f'--c_chess_exe={self._c_chess_cli_exe}',
             f'--stockfish_base={self._stockfish_base_exe}',
             f'--stockfish_test={self._stockfish_test_exe}',
@@ -989,6 +988,9 @@ class NetworkTesting(Thread):
 
         if self._nodes_per_move:
             args.append(f'--nodes_per_move={self._nodes_per_move}')
+
+        if self._ordo_exe:
+            args.append(f'--ordo_exe={self._ordo_exe}'),
 
         for arg in self._additional_args:
             args.append(arg)
@@ -1502,6 +1504,7 @@ def parse_cli_args():
     parser.add_argument("--network-testing-hash-mb", type=int, default=8, dest='network_testing_hash_mb', help="Number of MB of memory to use for hash allocation for each engine being tested.")
     parser.add_argument("--network-testing-games-per-round", type=int, default=20 * default_testing_threads, dest='network_testing_games_per_round', help="Number of games per round to use. Essentially a testing batch size. By default uses larger batches with larger --network-testing-threads")
     parser.add_argument("--resume-training", type=str2bool, default=False, dest='resume_training', help="Attempts to resume each run from its latest checkpoint.")
+    parser.add_argument("--do-approximate-ordo", type=str2bool, default=True, dest='do_approximate_ordo', help="If true then doesn't launch ordo and instead does a fast approximate computation. Workaround for ordo memory usage issues.")
     args = parser.parse_args()
 
     if not args.training_dataset:
@@ -1680,7 +1683,8 @@ def main():
 
     do_bookkeeping(bookkeeping_directory, args)
 
-    setup_ordo(ordo_directory)
+    if not args.do_approximate_ordo:
+        setup_ordo(ordo_directory)
 
     setup_c_chess_cli(c_chess_cli_directory)
 
@@ -1777,7 +1781,7 @@ def main():
     network_testing = NetworkTesting(
         nnue_pytorch_directory=nnue_pytorch_directory,
         root_dir=os.path.join(experiment_directory, 'training'),
-        ordo_exe=make_ordo_executable_path(ordo_directory),
+        ordo_exe=None if args.do_approximate_ordo else make_ordo_executable_path(ordo_directory),
         c_chess_cli_exe=make_c_ches_cli_executable_path(c_chess_cli_directory),
         stockfish_base_exe=make_stockfish_executable_path(stockfish_base_directory),
         stockfish_test_exe=make_stockfish_executable_path(stockfish_test_directory),
