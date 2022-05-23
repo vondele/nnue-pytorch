@@ -9,6 +9,14 @@ import shutil
 import threading
 from pathlib import Path, PurePath
 
+GLOBAL_LOCK = threading.Lock()
+def print_atomic(*args, **kwargs):
+    GLOBAL_LOCK.acquire()
+    try:
+        print(*args, **kwargs)
+    finally:
+        GLOBAL_LOCK.release()
+
 class GameParams:
     def __init__(self, hash, threads, games_per_round, time_per_game=None, time_increment_per_move=None, nodes_per_move=None):
         self.hash = hash
@@ -61,7 +69,7 @@ def convert_ckpt(root_dir,features):
         if not os.path.exists(nnue_file_name) and os.path.exists(ckpt):
             with subprocess.Popen([sys.executable, 'serialize.py', ckpt, nnue_file_name, f'--features={features}']) as process:
                 if process.wait():
-                    print("Error serializing!")
+                    print_atomic("Error serializing!")
 
 
 def find_nnue(root_dir):
@@ -116,7 +124,7 @@ def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfis
         netname = PurePath(*PurePath(evalfile).parts[-2:])
         command += ['-engine', f'cmd={stockfish_test}', f'name={netname}', f'option.EvalFile={evalfile}']
 
-    print("Running match with c-chess-cli ... {}".format(pgn_file_name), flush=True)
+    print_atomic("Running match with c-chess-cli ... {}".format(pgn_file_name), flush=True)
     c_chess_out = open(os.path.join(root_dir, "c_chess.out"), 'w')
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     seen = {}
@@ -133,9 +141,9 @@ def run_match(best, root_dir, c_chess_exe, concurrency, book_file_name, stockfis
     sys.stdout.write('\n')
     c_chess_out.close()
     if process.wait() != 0:
-        print("Error running match!")
+        print_atomic("Error running match!")
 
-    print("Finished running match.")
+    print_atomic("Finished running match.")
 
 def run_ordo(root_dir, ordo_exe, concurrency):
     """ run an ordo calcuation on an existing pgn file """
@@ -157,16 +165,16 @@ def run_ordo(root_dir, ordo_exe, concurrency):
         '-o', f'{ordo_file_name_temp}'
     ]
 
-    print("Running ordo ranking ... {}".format(ordo_file_name), flush=True)
+    print_atomic("Running ordo ranking ... {}".format(ordo_file_name), flush=True)
     with subprocess.Popen(command) as process:
         if process.wait():
-            print("Error running ordo!")
+            print_atomic("Error running ordo!")
         else:
             os.replace(ordo_file_name_temp, ordo_file_name)
 
     # Newlines make it less likely the output is on a line of the running match results
     # Probably both threads needs some cleaner way to do I/O
-    print("\n\nFinished running ordo.\n\n")
+    print_atomic("Finished running ordo.")
 
 def run_round(
     root_dir,
@@ -188,29 +196,29 @@ def run_round(
     # find a list of networks to test
     nnues = find_nnue(root_dir)
     if len(nnues) == 0:
-        print("No .nnue files found in {}".format(root_dir))
+        print_atomic("No .nnue files found in {}".format(root_dir))
         time.sleep(10)
         return
     else:
-        print("Found {} nn-epoch*.nnue files".format(len(nnues)))
+        print_atomic("Found {} nn-epoch*.nnue files".format(len(nnues)))
 
     # Get info from ordo data if that is around
     ordo_scores = parse_ordo(root_dir, nnues)
 
     # provide the top 3 nets
-    print("Best nets so far:")
+    print_atomic("Best nets so far:")
     ordo_scores = dict(
         sorted(ordo_scores.items(), key=lambda item: item[1][0], reverse=True)
     )
     count = 0
     for net in ordo_scores:
-        print("   {} : {} +- {}".format(net, ordo_scores[net][0], ordo_scores[net][1]))
+        print_atomic("   {} : {} +- {}".format(net, ordo_scores[net][0], ordo_scores[net][1]))
         count += 1
         if count == 3:
             break
 
     # get top 3 with error bar added, for further investigation
-    print("Measuring nets:")
+    print_atomic("Measuring nets:")
     ordo_scores = dict(
         sorted(
             ordo_scores.items(),
@@ -220,7 +228,7 @@ def run_round(
     )
     best = []
     for net in ordo_scores:
-        print("   {} : {} +- {}".format(net, ordo_scores[net][0], ordo_scores[net][1]))
+        print_atomic("   {} : {} +- {}".format(net, ordo_scores[net][0], ordo_scores[net][1]))
         best.append(net)
         if len(best) == 3:
             break
@@ -255,7 +263,7 @@ def run_round(
                 for line in file_from:
                     file_to.write(line)
     except:
-        print('Something went wrong when adding new games to the main file.')
+        print_atomic('Something went wrong when adding new games to the main file.')
 
 def main():
     # basic setup
