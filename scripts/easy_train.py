@@ -27,6 +27,9 @@ def validate_python_version():
         LOGGER.error(f'Found python version {sys.version} but 3.7 is required. Exiting.')
         return False
 
+
+# Functions for checking external dependencies.
+
 def run_for_version(name):
     process = subprocess.Popen(
         [name, '--version'],
@@ -125,6 +128,10 @@ def maybe_int(v):
         return v
 
 class PackageInfo:
+    '''
+    Represents an [installed] python package.
+    '''
+
     def __init__(self, name):
         self._spec = importlib.util.find_spec(name)
         self._version_str = None
@@ -146,6 +153,8 @@ class PackageInfo:
     @property
     def version(self):
         return self._version_str
+
+# Functions for checking required python packages.
 
 def validate_asciimatics():
     pkg = PackageInfo('asciimatics')
@@ -199,6 +208,8 @@ def validate_gputil():
         LOGGER.error('No GPUtil found. Run `pip install GPUtil`. Exiting.')
         return False
 
+# Validation of required external and package dependencies.
+
 def validate_imports():
     success = True
     success &= validate_asciimatics()
@@ -222,9 +233,11 @@ def validate_environment_requirements():
         return False
     return success
 
+# Exit early if the requires packages have not been found
 if not validate_environment_requirements():
     sys.exit(2)
 
+# Only now import the rest of the required packages
 from asciimatics.widgets import Frame, ListBox, Layout, Divider, Text, Button, \
     TextBox, Widget, VerticalDivider, MultiColumnListBox, Label, PopUpDialog
 from asciimatics.scene import Scene
@@ -247,13 +260,31 @@ from datetime import datetime, timedelta
 from tqdm.auto import tqdm
 from pathlib import Path
 
+# Specify which versions of ordo and c-chess-cli we want.
+# We rely on specific well-tested commits because we know exactly what we need.
+# repo/branch, commit id
 ORDO_GIT = ('michiguel/Ordo', '17eec774f2e4b9fdd2b1b38739f55ea221fb851a')
 C_CHESS_CLI_GIT = ('lucasart/c-chess-cli', '6d08fee2e95b259c486b21a886f6911b61f676af')
 TIMEOUT = 600.0 # on some systems starting pytorch can be really slow
 
 def terminate_process_on_exit(process):
+    '''
+    Create a watchdog process that awaits the termination of this (calling) process
+    and automatically terminates a given process (python's subprocess object) after.
+
+    On Windows this is achieved by a wmic call that is deprecated in windows 10,
+    and may not work in windows 11.
+        See: https://stackoverflow.com/a/22559493/3763139
+             https://superuser.com/a/1299350/388191
+
+    TODO: powershell version
+    TODO: linux version
+    '''
+
     if sys.platform == "win32":
         try:
+            # We cannot execute from string so we write the script to a file.
+            # Doesn't do anything if the file already exists.
             with open('.process_watchdog_helper.bat', 'x') as file:
                 file.write(""":waitforpid
 tasklist /nh /fi "pid eq %1" 2>nul | find "%1" >nul
@@ -276,8 +307,21 @@ if %ERRORLEVEL%==0 (
         pass
 
 class ScheduledExit(Exception):
+    '''
+    This exception is raised by the scheduled exit process.
+    It is only meant to be thrown in the main thread.
+    '''
     pass
 
+# An implementation of a mechanism to raise an exception after
+# a specified timeout in the main thread.
+# Ideally the main thread's execution should be made in such a way that
+# this doesn't get swallowed by some generic except block.
+# The exception will however be rethrown every 5 seconds after.
+# It is expected that the application terminates some reasonable time after
+# ScheduledExit is thrown, therefore this is considered an acceptable solution.
+# TODO: Windows support (possibly by a normal timer and a different signal,
+#       could also replace the current solution)
 CURRENT_SCHEDULED_EXIT_TIME = None
 def raise_scheduled_exit_signal_handler(signum, frame):
     global CURRENT_SCHEDULED_EXIT_TIME
@@ -289,6 +333,9 @@ def raise_scheduled_exit_signal_handler(signum, frame):
 
     raise ScheduledExit('Scheduled exit.')
 
+# Makes the ScheduledExit exception be thrown in the main thread after
+# the specified number of seconds pass. If there is an event already scheduled
+# then the earliest one will take precedence.
 def schedule_exit_prioritise_earlier(timeout_seconds):
     global CURRENT_SCHEDULED_EXIT_TIME
     now = datetime.now()
@@ -302,6 +349,7 @@ def schedule_exit_prioritise_earlier(timeout_seconds):
         signal.alarm(new_timeout_s)
         LOGGER.info(f'Schedule exit after {timeout_seconds}s')
 
+# Removes all scheduled exits.
 def unschedule_exit():
     global CURRENT_SCHEDULED_EXIT_TIME
     if CURRENT_SCHEDULED_EXIT_TIME:
@@ -309,6 +357,12 @@ def unschedule_exit():
         CURRENT_SCHEDULED_EXIT_TIME = None
 
 class DecayingRunningAverage:
+    '''
+    Represents an average of a list of values with exponential decay of old values.
+    Every added value has weight of decay**n, where n is the distance from the
+    last element. For the last added element n==0.
+    '''
+
     def __init__(self, decay=0.995):
         self._decay = decay
         self._total = 0.0
@@ -326,10 +380,19 @@ class DecayingRunningAverage:
             return float('NaN')
 
     def update(self, value):
+        '''
+        Adds a new value at the end of the implicit running average list and
+        updates the counters to reflect the change in the running average.
+        '''
         self._total = self._total * self._decay + value
         self._count = self._count * self._decay + 1.0
 
 class SystemResources:
+    '''
+    Holds information about the usage of system resources at a time point of creation.
+    This includes GPU, CPU, and memory usage.
+    '''
+
     def __init__(self):
         self._gpus = dict()
         for gpu in GPUtil.getGPUs():
@@ -356,6 +419,11 @@ class SystemResources:
         return self._ram_max_mb
 
 class SystemResourcesMonitor(Thread):
+    '''
+    Periodically queries system resources.
+    Runs as a daemon so does not need to be cleaned up.
+    '''
+
     def __init__(self, period_seconds):
         super(SystemResourcesMonitor, self).__init__()
 
@@ -383,6 +451,9 @@ class SystemResourcesMonitor(Thread):
 
     @property
     def resources(self):
+        '''
+        Returns the most recent system resources measurement.
+        '''
         self._mutex.acquire()
         try:
             return self._resources
@@ -394,6 +465,10 @@ class SystemResourcesMonitor(Thread):
         self._stop_event.set()
 
 def find_latest_checkpoint(root_dir):
+    '''
+    Recursively searches the specified directory for
+    the .ckpt file with the latest creation date.
+    '''
     ckpts = [file for file in Path(root_dir).rglob("*.ckpt")]
     if not ckpts:
         return None
@@ -401,6 +476,16 @@ def find_latest_checkpoint(root_dir):
     return str(max(ckpts, key=lambda p: p.stat().st_ctime_ns))
 
 def find_best_checkpoint(root_dir):
+    '''
+    Recursively searches the specified directory the best
+    .ckpt file as determined by an ordo output file that must be
+    present under the path os.path.join(root_dir, 'ordo.out').
+    The path to the checkpoint must have 'nn-epoch' in it,
+    other checkpoints are not considered.
+
+    Returns None if the ordo file does not exist or
+    no suitable checkpoint has been found.
+    '''
     ckpts = [str(file) for file in Path(root_dir).rglob("*.ckpt")]
     nnues = [str(file) for file in Path(root_dir).rglob("*.nnue")]
     ordo_file_path = os.path.join(root_dir, 'ordo.out')
@@ -424,10 +509,22 @@ def find_best_checkpoint(root_dir):
 
     return None
 
+# A global instance of the resource monitor.
+# There is no need to have more than one.
 RESOURCE_MONITOR = SystemResourcesMonitor(2)
+
+# A regex pattern for a float number.
 NUMERIC_CONST_PATTERN = '[-+]?(?:(?:\d*\.\d+)|(?:\d+\.?))(?:[Ee][+-]?\d+)?'
 
 class TrainingRun(Thread):
+    '''
+    Manages a single pytorch training run.
+    Starts it as a subprocess.
+    Provides information about the current state of training.
+    Runs as a separate thread and must be stopped before exiting.
+    '''
+
+    # The regex pattern for extracting information from the pytorch lightning's tqdm process bar output
     ITERATION_PATTERN = re.compile(f'Epoch (\\d+).*?(\\d+)/(\\d+).*?({NUMERIC_CONST_PATTERN})it/s, loss=({NUMERIC_CONST_PATTERN})')
     def __init__(
         self,
@@ -460,8 +557,8 @@ class TrainingRun(Thread):
         super(TrainingRun, self).__init__()
         self._gpu_id = gpu_id
         self._run_id = run_id
-        # use abspaths because we will be running the script from somewhere else
 
+        # Use abspaths because we will be running the script with a different cwd
         self._nnue_pytorch_directory = os.path.abspath(nnue_pytorch_directory)
         self._training_dataset = os.path.abspath(training_dataset)
         self._validation_dataset = os.path.abspath(validation_dataset)
@@ -485,6 +582,7 @@ class TrainingRun(Thread):
         self._resume_training = resume_training
         self._additional_args = additional_args
 
+        # State for the status updates
         self._current_step_in_epoch = None
         self._num_steps_in_epoch = None
         self._current_epoch = None
@@ -498,6 +596,7 @@ class TrainingRun(Thread):
         self._running = False
         self._error = None
 
+        # For speed calculation
         self._last_time = None
         self._last_step = None
 
@@ -567,6 +666,8 @@ class TrainingRun(Thread):
         while self._process.poll() is None and self._running:
             if not self._running:
                 break
+
+            # \r is properly recognized as a newline delimiter so we can just read by lines
             line = reader.readline().strip()
             if not self._has_finished:
                 try:
@@ -580,6 +681,7 @@ class TrainingRun(Thread):
                         # negative speed when running from checkpoint. So we work around this
                         # by computing our own speed.
                         # Only update every 10 steps to avoid the it/s to blow up.
+                        # (With a higher update frequence might be affected by IO caching)
                         curr_step = self._current_step_in_epoch
                         if curr_step == self._last_step:
                             continue
@@ -599,11 +701,15 @@ class TrainingRun(Thread):
 
                         self._current_loss = float(matches.group(5))
                         self._has_started = True
+
+                        # Provide some output for the cli interface.
                         if self._current_step_in_epoch % 100 == 0:
                             LOGGER.info(line)
                 except:
+                    # Usually errors. Aside from that all output should be catched above. We want these logged.
                     LOGGER.info(line)
                     pass
+
                 if 'CUDA_ERROR_OUT_OF_MEMORY' in line or 'CUDA out of memory' in line:
                     self._process.terminate()
                     self._error = 'Cuda out of memory error.'
@@ -703,6 +809,10 @@ def requests_get_content(url, *args, **kwargs):
         raise Exception(f'GET request to {url} failed')
 
 def get_zipfile_members_strip_common_prefix(zipfile):
+    '''
+    Removes a common previx from zipfile entries.
+    So for example will remove the top-level directory.
+    '''
     parts = []
     for name in zipfile.namelist():
         if not name.endswith('/'):
@@ -715,10 +825,16 @@ def get_zipfile_members_strip_common_prefix(zipfile):
             yield zipinfo
 
 def git_download_branch_or_commit(directory, repo, branch_or_commit):
+    '''
+    Github proves an API to download zips of specific commits, so
+    we don't need to use git clone.
+    '''
     url = f'http://github.com/{repo}/zipball/{branch_or_commit}'
     zipped_content = requests_get_content(url, timeout=TIMEOUT)
     zipped_input = zipfile.ZipFile(io.BytesIO(zipped_content), mode='r')
     zipped_input.extractall(directory, get_zipfile_members_strip_common_prefix(zipped_input))
+
+# Utility functions for dependency setup and executable location.
 
 def make_ordo_executable_path(directory):
     path = os.path.join(directory, 'ordo')
@@ -763,7 +879,7 @@ def setup_ordo(directory):
     if not is_ordo_setup(directory):
         raise Exception('Ordo does not work.')
 
-def make_c_ches_cli_executable_path(directory):
+def make_c_chess_cli_executable_path(directory):
     path = os.path.join(directory, 'c-chess-cli')
     if sys.platform == "win32":
         path += '.exe'
@@ -771,7 +887,7 @@ def make_c_ches_cli_executable_path(directory):
 
 def is_c_chess_cli_setup(directory):
     try:
-        path = make_c_ches_cli_executable_path(directory)
+        path = make_c_chess_cli_executable_path(directory)
         with subprocess.Popen([path, '-version'], stdout=subprocess.DEVNULL) as process:
             if process.wait(timeout=TIMEOUT):
                 return False
@@ -853,6 +969,8 @@ def setup_nnue_pytorch(directory, repo, branch_or_commit):
     command = []
     if sys.platform == "linux":
         command += ['sh']
+    # It's a .bat file made for windows but works on linux too.
+    # Just needs to be called with sh.
     command += [os.path.join(directory, 'compile_data_loader.bat')]
     with subprocess.Popen(command, cwd=directory) as process:
         if process.wait():
@@ -862,7 +980,11 @@ def setup_nnue_pytorch(directory, repo, branch_or_commit):
         raise Exception(f'Incorrect nnue-pytorch setup or timeout.')
 
 class OrdoEntry:
-    # nets are named experiment_path/run_{}/nn-epoch{}.nnue
+    '''
+    Represents a single entry in an ordo file.
+    Expects players to be named after network paths, if the form experiment_path/run_{}/nn-epoch{}.nnue
+    '''
+
     NET_PATTERN = re.compile(r'.*?run_(\d+).*?nn-epoch(\d+)\.nnue')
     def __init__(self, line=None, network_path=None, elo=None, elo_error=None, run_id=None, epoch=None):
         if line:
@@ -901,6 +1023,12 @@ class OrdoEntry:
         return self._elo_error
 
 class CChessCliRunningTestEntry:
+    '''
+    Represents a single line of output from the run_games.py
+    (which forwards c-chess-cli output) during network testing process.
+    Calculates additional match statistics.
+    '''
+
     LINE_PATTERN = re.compile(r'Score.*?run_(\d+).*?nn-epoch(\d+)\.nnue:\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*')
     def __init__(self, line=None):
         fields = CChessCliRunningTestEntry.LINE_PATTERN.search(line)
@@ -954,6 +1082,15 @@ class CChessCliRunningTestEntry:
 
 
 class NetworkTesting(Thread):
+    '''
+    Manages the network testing process.
+    Encapsulates run_games.py.
+    Provides information about the current set of networks and their results.
+    Provides information about the currently ongoing tests.
+    Provides information about the current ongoing network conversions.
+    Runs as a separate thread and must be stopped before exiting.
+    '''
+
     def __init__(
         self,
         nnue_pytorch_directory,
@@ -994,6 +1131,7 @@ class NetworkTesting(Thread):
         self._active = active
         self._additional_args = additional_args
 
+        # State for status management
         self._results = []
         self._running = False
         self._process = None
@@ -1151,6 +1289,7 @@ class NetworkTesting(Thread):
         try:
             with open(ordo_file_path, 'r') as ordo_file:
                 lines = ordo_file.readlines()
+                # Pring the first few lines for the CLI interface.
                 for line in lines[:7]:
                     LOGGER.info(line.strip())
                 for line in lines:
@@ -1196,6 +1335,10 @@ def duration_string_from_seconds_compact(seconds):
         return f'~{second}s'
 
 class TrainerRunsWidget(Widget):
+    '''
+    Displays information about the assigned training run.
+    '''
+
     def __init__(self, runs, name=None):
         super(TrainerRunsWidget, self).__init__(name)
 
@@ -1208,6 +1351,7 @@ class TrainerRunsWidget(Widget):
         self._runs = list(sorted(runs, key=lambda x: (x.gpu_id, x.run_id)))
 
     def required_height(self, offset, w):
+        # A special value indicating that it should use the whole column.
         return -135792468
 
     def reset(self):
@@ -1247,7 +1391,8 @@ class TrainerRunsWidget(Widget):
         return list(ids)
 
     def _make_run_text(self, run):
-        # TODO some output for the logger
+        # TODO: Some output for the logger.
+        #       Right now only the progress bar in the training run is printed occasionally.
         if run.has_finished:
             loss = run.current_loss
             return [f'  Run {run.run_id} - Completed; Loss: {loss}']
@@ -1287,7 +1432,7 @@ class TrainerRunsWidget(Widget):
                 ]
 
     def _make_gpu_text(self, gpu_id, gpu_usage):
-        # TODO some output for the logger
+        # TODO: Some output for the logger
         if gpu_id in gpu_usage:
             gpu_compute_pct = gpu_usage[gpu_id]['compute_pct']
             gpu_memory_mb = gpu_usage[gpu_id]['memory_mb']
@@ -1297,6 +1442,8 @@ class TrainerRunsWidget(Widget):
             return f'GPU {gpu_id}'
 
     def update(self, frame_no):
+        # TODO: scrolling
+
         self._clear_area()
 
         if self._has_focus:
@@ -1420,7 +1567,6 @@ class MainView(Frame):
         layout2 = Layout([1, 1, 1, 1])
         self.add_layout(layout2)
 
-        # TODO: Revise controls
         layout2.add_widget(Button("Quit", self._quit), 3)
 
         self.fix()
@@ -1454,7 +1600,7 @@ class MainView(Frame):
         self._scene.add_effect(
             PopUpDialog(
                 self._screen,
-                "Are you sure?",
+                "Are you sure you want to quit?",
                 ["Yes", "No"],
                 has_shadow=True,
                 on_close=self._quit_on_yes
@@ -1479,6 +1625,9 @@ def app(screen, scene, training_runs, network_testing):
     screen.play(scenes, stop_on_resize=True, start_scene=scene, allow_int=True)
 
 def str2bool(v):
+    '''
+    A "type" for argparse
+    '''
     if isinstance(v, bool):
         return v
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -1608,6 +1757,12 @@ class TqdmDownloadProgressBar(tqdm):
         return self.update(blocks_transferred * block_size - self.n)  # also sets self.n = b * bsize
 
 def setup_book(directory, args):
+    '''
+    If the args.network_testing_book is a URL then it downloads the book
+    and reassigns args.network_testing_book to the actual book path.
+    Otherwise does nothing.
+    '''
+
     if not is_url(args.network_testing_book):
         return
 
@@ -1645,6 +1800,11 @@ def setup_book(directory, args):
     LOGGER.info('Book setup completed.')
 
 def prepare_start_model(directory, model_path, run_id, nnue_pytorch_directory, features):
+    '''
+    Copies the specified model to the desired directory.
+    Performs conversion to .pt if necessary.
+    '''
+
     os.makedirs(directory, exist_ok=True)
 
     LOGGER.info(f'Starting from model: {model_path}')
@@ -1683,6 +1843,10 @@ def prepare_start_model(directory, model_path, run_id, nnue_pytorch_directory, f
     return destination_model_path
 
 def prepare_start_model_from_experiment(directory, experiment_path, run_id, nnue_pytorch_directory, features):
+    '''
+    Prepares start model with the best or (if no ordo found)
+    last checkpoint from the given experiment.
+    '''
     root_dir = os.path.join(experiment_path, 'training')
     best_model = find_best_checkpoint(root_dir)
     if best_model is None:
@@ -1692,6 +1856,12 @@ def prepare_start_model_from_experiment(directory, experiment_path, run_id, nnue
     return prepare_start_model(directory, best_model, run_id, nnue_pytorch_directory, features)
 
 def get_default_feature_set_from_nnue_pytorch(nnue_pytorch_directory):
+    '''
+    features.py in nnue-pytorch defines the default feature set to use.
+    We scrape it for the feature set name.
+    Normally we could import that file and let it add the argument to argparse,
+    but we setup argparse before nnue-pytorch is setup so we have to do it like that.
+    '''
     try:
         with open(os.path.join(nnue_pytorch_directory, 'features.py'), 'r') as features_file:
             for line in features_file:
@@ -1702,6 +1872,9 @@ def get_default_feature_set_from_nnue_pytorch(nnue_pytorch_directory):
         raise Exception('Could not infer the default feature set from the nnue-pytorch installation.')
 
 def parse_duration_hms_to_s(duration_str):
+    '''
+    Parses a duration of the form [h:][m:]s
+    '''
     parts = duration_str.split(':')
     s = int(parts[-1])
     m = 0 if len(parts) < 2 else int(parts[-2])
@@ -1709,6 +1882,10 @@ def parse_duration_hms_to_s(duration_str):
     return h * 3600 + m * 60 + s
 
 def spawn_training_watcher(training_runs, exit_timeout_after_finished):
+    '''
+    Spawns a daemon thread that awaits training end and the schedules the script
+    to exit after the specified amount of seconds.
+    '''
     def f():
         while True:
             finished = True
@@ -1860,7 +2037,7 @@ def main():
         nnue_pytorch_directory=nnue_pytorch_directory,
         root_dir=os.path.join(experiment_directory, 'training'),
         ordo_exe=None if args.do_approximate_ordo else make_ordo_executable_path(ordo_directory),
-        c_chess_cli_exe=make_c_ches_cli_executable_path(c_chess_cli_directory),
+        c_chess_cli_exe=make_c_chess_cli_executable_path(c_chess_cli_directory),
         stockfish_base_exe=make_stockfish_executable_path(stockfish_base_directory),
         stockfish_test_exe=make_stockfish_executable_path(stockfish_test_directory),
         features=args.features,
@@ -1875,8 +2052,6 @@ def main():
         active=do_network_testing,
         additional_args=[arg for arg in args.additional_testing_args or []]
     )
-
-    #TODO it would be nice to be able to set a time limit at the cmdline and stop after e.g. 20h
 
     for tr in training_runs:
         tr.start()
