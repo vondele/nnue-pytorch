@@ -358,7 +358,7 @@ def run_round(
             target=run_approximate_ordo,
             args=(root_dir,)
         )
-    # TODO/BUG both threads generate output, that can be corrupted, making the calling process confused
+
     run_match_thread.start()
     run_ordo_thread.start()
 
