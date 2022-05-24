@@ -1644,65 +1644,402 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 def parse_cli_args():
-    default_pytorch_threads=2
-    default_data_loader_threads=4
-    default_testing_threads=max(1, os.cpu_count() - default_pytorch_threads - default_data_loader_threads)
+    default_pytorch_threads = 2
+    default_data_loader_threads = 4
+    default_testing_threads = max(1, os.cpu_count() - default_pytorch_threads - default_data_loader_threads)
+    default_build_threads = max(1, os.cpu_count() // 2)
+
     parser = argparse.ArgumentParser(
         description="Trains the network.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--workspace-path", type=str, default='./easy_train_data', dest='workspace_path')
-    parser.add_argument("--experiment-name", type=str, dest='experiment_name')
-    parser.add_argument("--training-dataset", type=str, dest='training_dataset', help="Training data file name (.bin or .binpack)")
-    parser.add_argument("--validation-dataset", type=str, dest='validation_dataset', default=None, help="Validation data file name (.bin or .binpack), defaults to training data")
-    parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
-    parser.add_argument("--gamma", default=0.992, type=float, dest='gamma', help="Multiplicative factor applied to the learning rate after every epoch.")
-    parser.add_argument("--lr", default=8.75e-4, type=float, dest='lr', help="Initial learning rate.")
-    parser.add_argument("--num-workers", default=default_data_loader_threads, type=int, dest='num_workers', help="Number of worker threads to use for data loading (binpacks). Increase with large skipping rates, or underloaded GPUs")
-    parser.add_argument("--batch-size", default=16384, type=int, dest='batch_size', help="Number of positions per batch / per iteration.")
-    parser.add_argument("--threads", default=default_pytorch_threads, type=int, dest='threads', help="Number of torch threads to use.")
-    parser.add_argument("--seed", default=42, type=int, dest='seed', help="torch seed to use.")
-    parser.add_argument("--smart-fen-skipping", default=True, type=str2bool, dest='smart_fen_skipping', help="If used then no smart fen skipping will be done. By default smart fen skipping is done.")
-    parser.add_argument("--wld-fen-skipping", default=True, type=str2bool, dest='wld_fen_skipping', help="If used then no wld fen skipping will be done. By default wld fen skipping is done.")
-    parser.add_argument("--random-fen-skipping", default=3, type=int, dest='random_fen_skipping', help="skip fens randomly on average random_fen_skipping before using one.")
-    parser.add_argument("--start-from-model", default=None, type=str, dest='start_from_model', help="Initializes training using the weights from the given .pt .ckpt .nnue model")
-    parser.add_argument("--start-from-experiment", default=None, type=str, dest='start_from_experiment', help="Initializes training using the best network from a given experiment (by name). Uses best net from ordo, fallbacks to last.")
-    parser.add_argument("--start-from-engine-test-net", default=False, type=str2bool, dest='start_from_engine_test_net', help="Initializes training using the weights from the .nnue associated with --engine-test-branch")
-    parser.add_argument("--gpus", type=str, dest='gpus', default='0', help="a GPU ID or a list of GPU IDs.")
-    parser.add_argument("--runs-per-gpu", type=int, dest='runs_per_gpu', default=1, help="To increase the load on strong GPUs run more than one repetition of this experiment and reduce net variance.")
-    parser.add_argument("--features", type=str, default=None, help="The feature set to use. If not specified then will be inferred from the downloaded nnue-pytorch repo") # TODO can this be made a default based on the nnue-pytorch-branch specified?
-    parser.add_argument("--max_epoch", type=int, default=400, help="Number of epochs to train for.")
-    parser.add_argument("--network-save-period", default=20, dest='network_save_period', help="Number of epochs between network snapshots. None to disable.")
-    parser.add_argument("--save-last-network", default=True, dest='save_last_network', help="Whether to always save the last produced network.")
-    parser.add_argument("--additional-training-arg", type=str, nargs='*', dest='additional_training_args', help="Additional training args passed verbatim.")
-    parser.add_argument("--additional-testing-arg", type=str, nargs='*', dest='additional_testing_args', help="Additional network testing args passed verbatim.")
-    parser.add_argument("--engine-base-branch", type=str, default='official-stockfish/Stockfish/master', dest='engine_base_branch', help="Path to the commit/branch to use for the engine baseline.")
-    parser.add_argument("--engine-test-branch", type=str, default='official-stockfish/Stockfish/master', dest='engine_test_branch', help="Path to the commit/branch to use for the engine being tested.")
-    parser.add_argument("--nnue-pytorch-branch", type=str, default='glinscott/nnue-pytorch/master', dest='nnue_pytorch_branch', help="Path to the commit/branch to use for the trainer being tested.")
-    parser.add_argument("--build-engine-arch", type=str, default='x86-64-modern', dest='build_engine_arch', help="ARCH to use for engine compilation, e.g. x86-64-avx2 for recent hardware")
-    parser.add_argument("--build-threads", type=int, default=max(1, os.cpu_count() // 2), dest='build_threads', help="Number of threads to use for compilation. Default half of available.")
-    parser.add_argument("--fail-on-experiment-exists", type=str2bool, default=True, dest='fail_on_experiment_exists', help="By default an experiment must be created in an empty directory. Should only be used for debugging.")
-    parser.add_argument("--epoch-size", type=int, default=100000000, dest='epoch_size', help="Number of positions per epoch.")
-    parser.add_argument("--validation-size", type=int, default=1000000, dest='validation_size', help="Number of positions per validation step.")
-    parser.add_argument("--tui", type=str2bool, default=True, dest='tui', help="Whether to show a nice TUI.")
-    parser.add_argument("--do-network-testing", type=str2bool, default=True, dest='do_network_testing', help="Whether to test networks as they are generated.")
-    parser.add_argument("--do-network-training", type=str2bool, default=True, dest='do_network_training', help="Whether to train networks.")
-    parser.add_argument("--network-testing-threads", type=int, default=default_testing_threads, dest='network_testing_threads', help="Number of threads to use for network testing. By default the available number of threads - minus data loader and pytorch threads. The optimal value might depend on the --threads, --num-workers and other machine load.")
-    parser.add_argument("--network-testing-explore-factor", type=float, default=1.5, dest='network_testing_explore_factor', help="Elo error estimates are multiplied by this amount to determine testing candidates.")
-    parser.add_argument("--network-testing-book", type=str, default='https://github.com/official-stockfish/books/raw/master/UHO_XXL_+0.90_+1.19.epd.zip', dest='network_testing_book', help="Path to a suitable book, or suitable link see https://github.com/official-stockfish/books")
-    parser.add_argument("--network-testing-time-per-game", type=float, default=None, dest='network_testing_time_per_game', help="Number of seconds per game")
-    parser.add_argument("--network-testing-time-increment-per-move", type=float, default=None, dest='network_testing_time_increment_per_move', help="Number of seconds added to clock per move")
-    parser.add_argument("--network-testing-nodes-per-move", type=int, default=None, dest='network_testing_nodes_per_move', help="Number of nodes per move to use for testing. Overrides time control. Should be used ove time control for better consistency.")
-    parser.add_argument("--network-testing-hash-mb", type=int, default=8, dest='network_testing_hash_mb', help="Number of MB of memory to use for hash allocation for each engine being tested.")
-    parser.add_argument("--network-testing-games-per-round", type=int, default=20 * default_testing_threads, dest='network_testing_games_per_round', help="Number of games per round to use. Essentially a testing batch size. By default uses larger batches with larger --network-testing-threads")
-    parser.add_argument("--resume-training", type=str2bool, default=True, dest='resume_training', help="Attempts to resume each run from its latest checkpoint.")
-    parser.add_argument("--do-approximate-ordo", type=str2bool, default=True, dest='do_approximate_ordo', help="If true then doesn't launch ordo and instead does a fast approximate computation. Workaround for ordo memory usage issues.")
-    parser.add_argument("--auto-exit-timeout", type=str, default=None, dest='auto_exit_timeout', help="Exit timeout in format 'hh:mm:ss', 'mm:ss', or 'ss'")
-    parser.add_argument("--auto-exit-timeout-on-training-finished", type=str, default=None, dest='auto_exit_timeout_on_training_finished', help="Exit timeout after training finised in format 'hh:mm:ss', 'mm:ss', or 'ss'")
+    parser.add_argument(
+        '--workspace-path',
+        type=str,
+        metavar='PATH',
+        default='./easy_train_data',
+        dest='workspace_path',
+        help='Specifies the directory in which the dependencies, training, and testing will be set up.'
+    )
+    parser.add_argument(
+        '--experiment-name',
+        type=str,
+        metavar='NAME',
+        dest='experiment_name',
+        help='A name of the experiment is used to identify it. The experiment\'s directory will have the name experiment_[experiment_name].'
+    )
+    parser.add_argument(
+        '--training-dataset',
+        type=str,
+        metavar='PATH',
+        dest='training_dataset',
+        help='Path to the training data. Must be a single file. Supports .bin and .binpack files. Binpack recommended for maximum performance.'
+    )
+    parser.add_argument(
+        '--validation-dataset',
+        type=str,
+        metavar='PATH',
+        dest='validation_dataset',
+        default=None,
+        help='Path fo the validation data. Must be a single file. Same support as for training data. If not set then defaults to training data.'
+    )
+    parser.add_argument(
+        '--lambda',
+        default=1.0,
+        type=float,
+        metavar='FLOAT',
+        dest='lambda_',
+        help='Interpolation coefficient for training on evaluation/result. lambda=1.0 means train on evaluations. lambda=0.0 means train on game results. Must be in range [0, 1].'
+    )
+    parser.add_argument(
+        '--gamma',
+        default=0.992,
+        type=float,
+        metavar='FLOAT',
+        dest='gamma',
+        help='Multiplicative factor applied to the learning rate after every epoch. Values lower than 1 will cause the learning rate to decrease exponentially as training progresses.'
+    )
+    parser.add_argument(
+        '--lr',
+        default=8.75e-4,
+        type=float,
+        metavar='FLOAT',
+        dest='lr',
+        help='Initial learning rate.'
+    )
+    parser.add_argument(
+        '--num-workers',
+        default=default_data_loader_threads,
+        type=int,
+        dest='num_workers',
+        help='Number of worker threads to use for supplying training data. Increase with large skipping rates, or underloaded GPUs.'
+    )
+    parser.add_argument(
+        '--batch-size',
+        default=16384,
+        type=int,
+        metavar='INTEGER',
+        dest='batch_size',
+        help='Number of positions per batch (1 batch = 1 iteration).'
+    )
+    parser.add_argument(
+        '--threads',
+        default=default_pytorch_threads,
+        type=int,
+        metavar='INTEGER',
+        dest='threads',
+        help='Number of threads for pytorch to use. Generally performance does not scale well with the amount of threads.'
+    )
+    parser.add_argument(
+        '--seed',
+        default=42,
+        type=int,
+        metavar='INTEGER',
+        dest='seed',
+        help='The random number generator seed to use for training. Each run within a single session gets a slightly different (but deterministic) seed based on this master value.'
+    )
+    parser.add_argument(
+        '--smart-fen-skipping',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='smart_fen_skipping',
+        help='Whether to perform smart fen skipping. This attempts to heuristically skip non-quiet positions during training.'
+    )
+    parser.add_argument(
+        '--wld-fen-skipping',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='wld_fen_skipping',
+        help='Whether to perform position skipping during training that increases correlation between evaluations and results.'
+    )
+    parser.add_argument(
+        '--random-fen-skipping',
+        default=3,
+        type=int,
+        metavar='INTEGER',
+        dest='random_fen_skipping',
+        help='Skip on average random_fen_skipping positions during training before using one. Increases diversity for data that is not fully shuffled.'
+    )
+    parser.add_argument(
+        '--start-from-model',
+        default=None,
+        type=str,
+        metavar='PATH',
+        dest='start_from_model',
+        help='Initializes training using the weights from the given .pt, .ckpt, or .nnue model.'
+    )
+    parser.add_argument(
+        '--start-from-experiment',
+        default=None,
+        type=str,
+        metavar='NAME',
+        dest='start_from_experiment',
+        help='Initializes training using the best network from a given experiment (by name). Uses the best net from ordo, falls back to last created.'
+    )
+    parser.add_argument(
+        '--start-from-engine-test-net',
+        default=False,
+        type=str2bool,
+        metavar='BOOL',
+        dest='start_from_engine_test_net',
+        help='Initializes training using the weights from the .nnue model associated with --engine-test-branch.'
+    )
+    parser.add_argument(
+        '--gpus',
+        type=str,
+        metavar='INTEGER[,INTEGER]*',
+        dest='gpus',
+        default='0',
+        help='A single GPU ID or a list of GPU IDs to use for training. Note that a single run still uses a single GPU.'
+    )
+    parser.add_argument(
+        '--runs-per-gpu',
+        default=1,
+        type=int,
+        metavar='INTEGER',
+        dest='runs_per_gpu',
+        help='Number of runs to do in parallel on each GPU. To increase the load on strong GPUs run more than one run per GPU. Doing multiple runs also means that variance has lower impact on the results.'
+    )
+    parser.add_argument(
+        '--features',
+        default=None,
+        type=str,
+        metavar='FEATURESET',
+        help='The feature set to use. If not specified then will be inferred from the cloned nnue-pytorch repo.'
+    )
+    parser.add_argument(
+        '--max_epoch', '--num-epochs', # --max_epoch kept to match pytorch-lightning's name
+        default=400,
+        type=int,
+        metavar='INTEGER',
+        dest='max_epoch',
+        help='Number of epochs to train for.'
+    )
+    parser.add_argument(
+        '--network-save-period',
+        default=20,
+        type=int,
+        metavar='INTEGER',
+        dest='network_save_period',
+        help='Number of epochs between network snapshots (checkpoints). None to disable. Note that these take a lot of space.'
+    )
+    parser.add_argument(
+        '--save-last-network',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='save_last_network',
+        help='Whether to always save the last produced network (checkpoint).'
+    )
+    parser.add_argument(
+        '--additional-training-arg',
+        type=str,
+        metavar='STRING',
+        nargs='*',
+        dest='additional_training_args',
+        help='Additional training args passed verbatim.'
+    )
+    parser.add_argument(
+        '--additional-testing-arg',
+        type=str,
+        metavar='STRING',
+        nargs='*',
+        dest='additional_testing_args',
+        help='Additional network testing args passed verbatim.'
+    )
+    parser.add_argument(
+        '--engine-base-branch',
+        default='official-stockfish/Stockfish/master',
+        type=str,
+        metavar='BRANCH_OR_COMMIT',
+        dest='engine_base_branch',
+        help='Path to the commit/branch to use for the engine baseline. It is recommended to use a specific commit for consistency.'
+    )
+    parser.add_argument(
+        '--engine-test-branch',
+        default='official-stockfish/Stockfish/master',
+        type=str,
+        metavar='BRANCH_OR_COMMIT',
+        dest='engine_test_branch',
+        help='Path to the commit/branch to use for the engine being tested. It is recommended to use a specific commit for consistency.'
+    )
+    parser.add_argument(
+        '--nnue-pytorch-branch',
+        default='glinscott/nnue-pytorch/master',
+        type=str,
+        metavar='BRANCH_OR_COMMIT',
+        dest='nnue_pytorch_branch',
+        help='Path to the commit/branch to use for the trainer being tested. It is recommended to use a specific commit for consistency.'
+    )
+    parser.add_argument(
+        '--build-engine-arch',
+        default='x86-64-modern',
+        type=str,
+        metavar='ARCH',
+        dest='build_engine_arch',
+        help='ARCH to use for engine compilation, e.g. x86-64-avx2 for recent hardware.'
+    )
+    parser.add_argument(
+        '--build-threads',
+        default=default_build_threads,
+        type=int,
+        metavar='INTEGER',
+        dest='build_threads',
+        help='Number of threads to use for engine compilation.'
+    )
+    parser.add_argument(
+        '--fail-on-experiment-exists',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='fail_on_experiment_exists',
+        help='By default an experiment must be created in an empty directory. Ignored when --resume-training is True. Care should be taken when the directory already exists as it might create consistency issue when not everything gets resetup.'
+    )
+    parser.add_argument(
+        '--epoch-size',
+        default=100000000,
+        type=int,
+        metavar='INTEGER',
+        dest='epoch_size',
+        help='Number of positions per epoch (training step).'
+    )
+    parser.add_argument(
+        '--validation-size',
+        default=1000000,
+        type=int,
+        metavar='INTEGER',
+        dest='validation_size',
+        help='Number of positions per validation step.'
+    )
+    parser.add_argument(
+        '--tui',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='tui',
+        help='Whether to show a nice terminal user interface.'
+    )
+    parser.add_argument(
+        '--do-network-testing',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='do_network_testing',
+        help='Whether to test networks as they are generated.'
+    )
+    parser.add_argument(
+        '--do-network-training',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='do_network_training',
+        help='Whether to train networks.'
+    )
+    parser.add_argument(
+        '--network-testing-threads',
+        default=default_testing_threads,
+        type=int,
+        metavar='INTEGER',
+        dest='network_testing_threads',
+        help='Number of threads to use for network testing. By default the available number of threads minus default data loader and pytorch threads. The optimal value might depend on the --threads, --num-workers and other machine load.'
+    )
+    parser.add_argument(
+        '--network-testing-explore-factor',
+        default=1.5,
+        type=float,
+        metavar='FLOAT',
+        dest='network_testing_explore_factor',
+        help='Elo error estimates are multiplied by this amount to determine testing candidates.'
+    )
+    parser.add_argument(
+        '--network-testing-book',
+        default='https://github.com/official-stockfish/books/raw/master/UHO_XXL_+0.90_+1.19.epd.zip',
+        type=str,
+        metavar='PATH_OR_URL',
+        dest='network_testing_book',
+        help='Path to a suitable book, or suitable link (URL). See https://github.com/official-stockfish/books.'
+    )
+    parser.add_argument(
+        '--network-testing-time-per-game',
+        default=None,
+        type=float,
+        metavar='FLOAT',
+        dest='network_testing_time_per_game',
+        help='Number of seconds per game for each engine.'
+    )
+    parser.add_argument(
+        '--network-testing-time-increment-per-move',
+        default=None,
+        type=float,
+        metavar='FLOAT',
+        dest='network_testing_time_increment_per_move',
+        help='Number of seconds added to the clock of an engine per move.'
+    )
+    parser.add_argument(
+        '--network-testing-nodes-per-move',
+        default=None,
+        type=int,
+        metavar='INTEGER',
+        dest='network_testing_nodes_per_move',
+        help='Number of nodes per move to use for testing. Overrides time control. Recommended over time control for better consistency.'
+    )
+    parser.add_argument(
+        '--network-testing-hash-mb',
+        default=8,
+        type=int,
+        metavar='INTEGER',
+        dest='network_testing_hash_mb',
+        help='Number of MiB of memory to use for hash allocation for each engine being tested.'
+    )
+    parser.add_argument(
+        '--network-testing-games-per-round',
+        default=20 * default_testing_threads,
+        type=int,
+        metavar='INTEGER',
+        dest='network_testing_games_per_round',
+        help='Number of games per round to use. Essentially a testing batch size.'
+    )
+    parser.add_argument(
+        '--resume-training',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='resume_training',
+        help='Attempts to resume each run from its latest checkpoint.'
+    )
+    parser.add_argument(
+        '--do-approximate-ordo',
+        default=True,
+        type=str2bool,
+        metavar='BOOL',
+        dest='do_approximate_ordo',
+        help='If true then does not launch ordo and instead does a fast approximate computation. Workaround for ordo memory usage issues.'
+    )
+    parser.add_argument(
+        '--auto-exit-timeout',
+        default=None,
+        type=str,
+        metavar='DURATION',
+        dest='auto_exit_timeout',
+        help='Automatically exit the script after a specified time has passed since its start. Duration format "h:m:s", "m:s", or "s".'
+    )
+    parser.add_argument(
+        '--auto-exit-timeout-on-training-finished',
+        default=None,
+        type=str,
+        metavar='DURATION',
+        dest='auto_exit_timeout_on_training_finished',
+        help='Automatically exit the script after a specified time has passed after training finished. Duration format "h:m:s", "m:s", or "s"'
+    )
     args = parser.parse_args()
 
     if not args.training_dataset:
         raise Exception('No training data specified')
+
+    if args.lambda_ < 0.0 or args.lambda_ > 1.0:
+        raise Exception('lambda must be within [0, 1]')
 
     args.validation_dataset = args.validation_dataset or args.training_dataset
     if not Path(args.validation_dataset).is_file():
@@ -1915,7 +2252,7 @@ def main():
 
     # if we ask to resume don't fail on existing directory
     if args.resume_training:
-       args.fail_on_experiment_exists=False
+       args.fail_on_experiment_exists = False
 
     absolute_workspace_path = os.path.abspath(args.workspace_path)
     experiment_directory = os.path.join(absolute_workspace_path, f'experiments/experiment_{args.experiment_name}')
