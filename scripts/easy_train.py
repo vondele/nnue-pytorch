@@ -312,11 +312,13 @@ if %ERRORLEVEL%==0 (
         pass
 
 # Exits the process forcefully after a specified amount of seconds with a given error code
+TUI_SCREEN = None
 def schedule_exit(timeout_seconds, errcode):
     def f():
         time.sleep(timeout_seconds)
         LOGGER.info(f'Performing a scheduled exit.')
-        # TODO: currently breaks TUI on windows and leaves the console unusable.
+        if TUI_SCREEN:
+            TUI_SCREEN.close(restore=True)
         os._exit(errcode)
 
     thread = Thread(target=f)
@@ -1613,11 +1615,20 @@ class MainView(Frame):
         return 1
 
 def app(screen, scene, training_runs, network_testing):
-    scenes = [
-        Scene([MainView(screen, training_runs, network_testing)], -1, name="Main")
-    ]
+    global TUI_SCREEN
 
-    screen.play(scenes, stop_on_resize=True, start_scene=scene, allow_int=True)
+    try:
+        TUI_SCREEN = screen
+
+        scenes = [
+            Scene([MainView(screen, training_runs, network_testing)], -1, name="Main")
+        ]
+
+        screen.play(scenes, stop_on_resize=True, start_scene=scene, allow_int=True)
+    except Exception as e:
+        raise e
+    finally:
+        TUI_SCREEN = None
 
 def str2bool(v):
     '''
