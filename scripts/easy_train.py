@@ -409,7 +409,7 @@ else:
         def close(self):
             if self.file is None:
                 return
-            os.unlink(self.file)
+            os.unlink(self.name)
             self.file.close()
             self.file = None
 
