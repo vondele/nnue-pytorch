@@ -2421,7 +2421,6 @@ def main():
         if args.features is None:
             args.features = get_default_feature_set_from_nnue_pytorch(nnue_pytorch_directory)
 
-        time.sleep(10)
         LOGGER.info('Initialization completed.')
 
 
