@@ -380,15 +380,13 @@ if sys.platform == "win32":
 
             self.handle = None
 
-        def __del__(self):
-            self.close()
-
         def __enter__(self):
             self.acquire()
             return self
 
         def __exit__(self, exc_type, exc_val, exc_tb):
             self.release()
+            self.close()
 else:
     import fcntl
 
