@@ -132,7 +132,7 @@ class NNUE(pl.LightningModule):
 
   lr - the initial learning rate
   """
-  def __init__(self, feature_set, start_lambda=1.0, end_lambda=1.0, max_epoch=800, gamma=0.992, lr=8.75e-4, num_psqt_buckets=8, num_ls_buckets=8):
+  def __init__(self, feature_set, start_lambda=1.0, end_lambda=1.0, max_epoch=800, gamma=0.992, lr=8.75e-4, param_index=0, num_psqt_buckets=8, num_ls_buckets=8):
     super(NNUE, self).__init__()
     self.num_psqt_buckets = num_psqt_buckets
     self.num_ls_buckets = num_ls_buckets
@@ -144,6 +144,7 @@ class NNUE(pl.LightningModule):
     self.max_epoch = max_epoch
     self.gamma = gamma
     self.lr = lr
+    self.param_index = param_index
 
     self.nnue2score = 600.0
     self.weight_scale_hidden = 64.0
@@ -292,10 +293,13 @@ class NNUE(pl.LightningModule):
 
     us, them, white_indices, white_values, black_indices, black_values, outcome, score, psqt_indices, layer_stack_indices = batch
 
-    # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
-    # This needs to match the value used in the serializer
-    in_scaling = 410
-    out_scaling = 361
+    counter=0
+    for ins in [-2, -1, 1, 2]:
+        for outs in [-2, -1, 1, 2]:
+            if counter == self.param_index:
+               in_scaling = 410 + ins * 20
+               out_scaling = 361 + outs * 20
+            counter = counter + 1
 
     q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * self.nnue2score / out_scaling).sigmoid()
     t = outcome
