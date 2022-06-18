@@ -293,22 +293,20 @@ class NNUE(pl.LightningModule):
 
     us, them, white_indices, white_values, black_indices, black_values, outcome, score, psqt_indices, layer_stack_indices = batch
 
-    counter=0
-    for ins in [-2, -1, 1, 2]:
-        for outs in [-2, -1, 1, 2]:
-            if counter == self.param_index:
-               in_scaling = 410 + ins * 20
-               out_scaling = 361 + outs * 20
-            counter = counter + 1
+    # win_rate_model a, b in internal units
+    scaling = 60 + 20 * self.param_index
+    offset = 270
 
-    q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * self.nnue2score / out_scaling).sigmoid()
-    t = outcome
-    p = (score / in_scaling).sigmoid()
+    scorenet = self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * self.nnue2score
+    q  = ( scorenet - offset) / scaling
+    qm = (-scorenet - offset) / scaling
+    qf = 0.5 * (1.0 + q.sigmoid() - qm.sigmoid())  # estimated match result
 
-    actual_lambda = self.start_lambda + (self.end_lambda - self.start_lambda) * (self.current_epoch / self.max_epoch)
-    pt = p * actual_lambda + t * (1.0 - actual_lambda)
+    p  = (score - offset) / scaling
+    pm = (-score - offset) / scaling
+    pf = 0.5 * (1.0 + p.sigmoid() - pm.sigmoid()) 
 
-    loss = torch.pow(torch.abs(pt - q), 2.6).mean()
+    loss = torch.pow(torch.abs(pf - qf), 2.6).mean()
 
     self.log(loss_type, loss)
 
