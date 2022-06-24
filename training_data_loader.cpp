@@ -859,7 +859,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             };
 
             auto do_filter = [&]() {
-                return (e.isCapturingMove() || e.isInCheck());
+                return (e.isCapturingMove() || e.isInCheck() || e.isLatePly());
             };
 
             if (random_fen_skipping && do_skip())
