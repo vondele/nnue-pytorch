@@ -6845,6 +6845,11 @@ namespace binpack
             return pos.isMoveLegal(move);
         }
 
+        [[nodiscard]] bool isLatePly() const
+        {
+            return ply > 120;
+        }
+
         [[nodiscard]] bool isCapturingMove() const
         {
             return pos.pieceAt(move.to) != chess::Piece::none() &&
