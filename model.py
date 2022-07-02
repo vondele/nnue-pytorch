@@ -294,15 +294,9 @@ class NNUE(pl.LightningModule):
     us, them, white_indices, white_values, black_indices, black_values, outcome, score, psqt_indices, layer_stack_indices = batch
 
     # win_rate_model a, b in internal units
-    counter=0
-    for ins in [-1, 0, 1]:
-        for outs in [-1, 0, 1]:
-            if counter == self.param_index:
-               in_scaling = 360 + ins * 20
-               out_scaling = 360 + outs * 20
-            counter = counter + 1
-
-    offset = 270
+    in_scaling = 340
+    out_scaling = 380
+    offset = 270 + (self.param_index - 2) * 20
 
     scorenet = self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * self.nnue2score
     q  = ( scorenet - offset) / in_scaling
