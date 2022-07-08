@@ -6845,9 +6845,9 @@ namespace binpack
             return pos.isMoveLegal(move);
         }
 
-        [[nodiscard]] bool isLatePly() const
+        [[nodiscard]] bool isLatePly(int limit) const
         {
-            return ply > 120;
+            return ply > limit;
         }
 
         [[nodiscard]] bool isCapturingMove() const

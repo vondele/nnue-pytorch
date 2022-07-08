@@ -816,7 +816,8 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             random_fen_skipping,
             prob = double(random_fen_skipping) / (random_fen_skipping + 1),
             filtered,
-            wld_filtered
+            wld_filtered,
+            param_index
             ](const TrainingDataEntry& e){
 
             static constexpr double desired_piece_count_weights[33] = {
@@ -859,7 +860,8 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             };
 
             auto do_filter = [&]() {
-                return (e.isCapturingMove() || e.isInCheck() || e.isLatePly());
+                int plyLimit = 120 + 20 * param_index;
+                return (e.isCapturingMove() || e.isInCheck() || e.isLatePly(plyLimit));
             };
 
             if (random_fen_skipping && do_skip())
