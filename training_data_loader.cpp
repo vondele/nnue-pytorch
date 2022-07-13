@@ -816,7 +816,8 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             random_fen_skipping,
             prob = double(random_fen_skipping) / (random_fen_skipping + 1),
             filtered,
-            wld_filtered
+            wld_filtered,
+            param_index
             ](const TrainingDataEntry& e){
 
             static constexpr double desired_piece_count_weights[33] = {
@@ -847,7 +848,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
             static constexpr double max_skipping_rate = 10.0;
 
             auto do_wld_skip = [&]() {
-                std::bernoulli_distribution distrib(1.0 - e.score_result_prob());
+                std::bernoulli_distribution distrib(1.0 - e.score_result_prob(param_index));
                 auto& prng = rng::get_thread_local_rng();
                 return distrib(prng);
             };
