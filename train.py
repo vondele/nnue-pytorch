@@ -183,6 +183,8 @@ def main():
     args.epoch_size,
     args.validation_size)
 
+  nnue = torch.compile(nnue)
+
   if (args.resume_from_checkpoint):
      trainer.fit(nnue, train, val, ckpt_path=args.resume_from_checkpoint)
   else:
