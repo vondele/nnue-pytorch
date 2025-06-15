@@ -259,8 +259,12 @@ def main():
         dest="early_fen_skipping",
         help="Skip n plies from the start.",
     )
+    # network specific arguments
+    parser.add_argument('--l1', type=int, default=3072, help='Layer 1 size')
     features.add_argparse_args(parser)
     args = parser.parse_args()
+
+    M.L1 = args.l1
 
     args.datasets = flatten_once(args.datasets)
     if args.validation_datasets:
