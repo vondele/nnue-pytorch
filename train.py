@@ -368,7 +368,7 @@ def main():
         else "cuda:" + str(trainer.strategy.root_device.index)
     )
 
-    nnue = torch.compile(nnue)
+    # nnue = torch.compile(nnue)
     nnue.to(device=main_device)
 
     print("Using c++ data loader")
