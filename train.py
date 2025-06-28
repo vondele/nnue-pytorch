@@ -41,6 +41,22 @@ class TimeLimitAfterCheckpoint(Callback):
             )
 
 
+class TrainingStatusCallback(Callback):
+    def on_fit_end(self, trainer, pl_module):
+        filepath = os.path.join(trainer.default_root_dir, "training_finished")
+
+        status = "finished"
+        if trainer.current_epoch >= trainer.max_epochs:
+            status = "finished: max_epochs reached"
+        elif trainer.should_stop:
+            status = "stopped early (e.g. time limit or early stopping)"
+
+        with open(filepath, "w") as f:
+            f.write(f"{status}\n")
+            f.write(f"epoch: {trainer.current_epoch}\n")
+            f.write(f"max_epochs: {trainer.max_epochs}\n")
+
+
 def make_data_loaders(
     train_filenames,
     val_filenames,
@@ -362,6 +378,7 @@ def main():
     print("Skip early plies: {}".format(args.early_fen_skipping))
     print("Skip simple eval : {}".format(args.simple_eval_skipping))
     print("Param index: {}".format(args.param_index))
+    print("Maximum time: {}".format(args.max_time))
 
     if args.threads > 0:
         print("limiting torch to {} threads.".format(args.threads))
@@ -388,6 +405,7 @@ def main():
             checkpoint_callback,
             TQDMProgressBar(refresh_rate=300),
             TimeLimitAfterCheckpoint(args.max_time),
+            TrainingStatusCallback(),
         ],
         enable_progress_bar=True,
         enable_checkpointing=True,
