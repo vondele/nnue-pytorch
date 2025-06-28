@@ -92,6 +92,13 @@ def str2bool(v):
 def flatten_once(lst):
     return sum(lst, [])
 
+def get_model_with_fixed_offset(model, batch_size, main_device):
+    print(model.layer_stacks)
+    print(model.layer_stacks.count)
+    model.layer_stacks.idx_offset = torch.arange(
+        0, batch_size * model.layer_stacks.count, model.layer_stacks.count, device=main_device
+    )
+    return model
 
 def main():
     parser = argparse.ArgumentParser(description="Trains the network.")
@@ -379,6 +386,8 @@ def main():
         else "cuda:" + str(trainer.strategy.root_device.index)
     )
 
+
+    nnue = get_model_with_fixed_offset(nnue, batch_size, main_device)
     nnue = torch.compile(nnue)
     nnue.to(device=main_device)
 

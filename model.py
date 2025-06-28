@@ -81,11 +81,7 @@ class LayerStacks(nn.Module):
         self.output.bias = nn.Parameter(output_bias)
 
     def forward(self, x, ls_indices):
-        # Precompute and cache the offset for gathers
-        if self.idx_offset == None or self.idx_offset.shape[0] != x.shape[0]:
-            self.idx_offset = torch.arange(
-                0, x.shape[0] * self.count, self.count, device=ls_indices.device
-            )
+        #idx_offset = torch.arange(0, x.shape[0] * self.count, self.count, device=ls_indices.device)
 
         indices = ls_indices.flatten() + self.idx_offset
 
