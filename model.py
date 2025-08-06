@@ -405,31 +405,10 @@ class NNUE(pl.LightningModule):
             * self.nnue2score
         )
 
-        p = self.loss_params
-        # convert the network and search scores to an estimate match result
-        # based on the win_rate_model, with scalings and offsets optimized
-        q = (scorenet - p.in_offset) / p.in_scaling
-        qm = (-scorenet - p.in_offset) / p.in_scaling
-        qf = 0.5 * (1.0 + q.sigmoid() - qm.sigmoid())
+        # Pointwise MSE loss: (f_i - g_i)^2
+        loss = torch.nn.functional.mse_loss(scorenet, score)
 
-        s = (score - p.out_offset) / p.out_scaling
-        sm = (-score - p.out_offset) / p.out_scaling
-        pf = 0.5 * (1.0 + s.sigmoid() - sm.sigmoid())
-
-        # blend that eval based score with te actual game outcome
-        t = outcome
-        actual_lambda = p.start_lambda + (p.end_lambda - p.start_lambda) * (
-            self.current_epoch / self.max_epoch
-        )
-        pt = pf * actual_lambda + t * (1.0 - actual_lambda)
-
-        # use a MSE-like loss function
-        loss = torch.pow(torch.abs(pt - qf), p.pow_exp)
-        if p.qp_asymmetry != 0.0:
-            loss = loss * ((qf > pt) * p.qp_asymmetry + 1)
-        loss = loss.mean()
-
-        self.log(loss_type, loss)
+        self.log("mse_loss", loss)
 
         return loss
 
