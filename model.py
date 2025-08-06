@@ -405,10 +405,32 @@ class NNUE(pl.LightningModule):
             * self.nnue2score
         )
 
-        # Pointwise MSE loss: (f_i - g_i)^2
-        loss = torch.nn.functional.mse_loss(scorenet, score)
 
-        self.log("mse_loss", loss)
+        # Create all pairwise differences
+        f_i = scorenet.unsqueeze(1)  # shape (N, 1)
+        f_j = scorenet.unsqueeze(0)  # shape (1, N)
+        f_diff = f_i - f_j           # shape (N, N)
+
+        g_i = score.unsqueeze(1)
+        g_j = score.unsqueeze(0)
+        g_diff = g_i - g_j
+
+        # Target: 1 if g_i > g_j, 0 if g_i < g_j
+        target = (g_diff > 0).float()
+
+        # Only keep strictly ordered pairs
+        valid_mask = (g_diff != 0)
+
+        # Predicted probabilities: sigmoid(f_i - f_j)
+        pred = torch.sigmoid(f_diff)
+
+        # Apply BCE loss
+        bce = torch.nn.functional.binary_cross_entropy(pred, target, reduction='none')
+
+        # Mask invalid pairs (g_i == g_j)
+        loss = bce[valid_mask].mean()
+
+        self.log("pairwise_bce_loss", loss)
 
         return loss
 
