@@ -48,16 +48,11 @@ class LayerStacks(nn.Module):
 
         self.count = count
         self.l1 = nn.Linear(2 * L1 // 2, (L2 + 1) * count)
-        # Factorizer only for the first layer because later
-        # there's a non-linearity and factorization breaks.
-        # This is by design. The weights in the further layers should be
-        # able to diverge a lot.
         self.l1_fact = nn.Linear(2 * L1 // 2, L2 + 1, bias=True)
         self.l2 = nn.Linear(L2 * 2, L3 * count)
         self.output = nn.Linear(L3, 1 * count)
 
         # Cached helper tensor for choosing outputs by bucket indices.
-        # Initialized lazily in forward.
         self.idx_offset = None
 
         self._init_layers()
@@ -77,7 +72,6 @@ class LayerStacks(nn.Module):
             output_bias.fill_(0.0)
 
             for i in range(1, self.count):
-                # Force all layer stacks to be initialized in the same way.
                 l1_weight[i * (L2 + 1) : (i + 1) * (L2 + 1), :] = l1_weight[
                     0 : (L2 + 1), :
                 ]
@@ -95,55 +89,52 @@ class LayerStacks(nn.Module):
         self.output.weight = nn.Parameter(output_weight)
         self.output.bias = nn.Parameter(output_bias)
 
+    def forward(self, x: torch.Tensor, ls_indices: torch.Tensor) -> torch.Tensor:
+        # build or reuse idx_offset (batch_size * count)
+        if (
+            self.idx_offset is None
+            or self.idx_offset.size(0) != x.shape[0] * self.count
+        ):
+            self.idx_offset = torch.arange(
+                0,
+                x.shape[0] * self.count,
+                self.count,
+                device=x.device,
+                dtype=ls_indices.dtype,
+            )
 
-def forward(self, x: Tensor, ls_indices: Tensor):
-    # compute batched index offset (long)
-    idx_offset = torch.arange(
-        0, x.shape[0] * self.count, self.count, device=x.device, dtype=ls_indices.dtype
-    )
+        indices = (ls_indices.flatten() + self.idx_offset).to(torch.long)
 
-    # combined indices into a single 1-d index for flattened (batch*count) rows
-    indices = (ls_indices.flatten() + idx_offset).to(torch.long)
+        # ----- L1 path -----
+        l1s = self.l1(x).reshape(-1, self.count, L2 + 1)
+        l1s_flat = l1s.reshape(-1, L2 + 1)
+        l1c_all = torch.index_select(l1s_flat, 0, indices).contiguous()
+        l1c_main, l1c_out = torch.split(l1c_all, [L2, 1], dim=1)
 
-    # ----- L1 path -----
-    # l1 produces shape (..., self.count, L2+1)
-    l1s = self.l1(x).reshape(-1, self.count, L2 + 1)
-    # flatten the first two dims so we can index by `indices`
-    l1s_flat = l1s.reshape(-1, L2 + 1)
-    # use index_select instead of advanced indexing to get stable outputs
-    l1c_all = torch.index_select(l1s_flat, 0, indices).contiguous()
-    # split into the two parts explicitly: first L2, then the remaining 1
-    l1c_main, l1c_out = torch.split(l1c_all, [L2, 1], dim=1)
+        l1f = self.l1_fact(x)
+        l1f_flat = l1f.reshape(-1, L2 + 1)
+        l1f_all = torch.index_select(l1f_flat, 0, indices).contiguous()
+        l1f_main, l1f_out = torch.split(l1f_all, [L2, 1], dim=1)
 
-    # l1_fact path: ensure same flattening shape before selecting
-    l1f = self.l1_fact(x)
-    l1f_flat = l1f.reshape(-1, L2 + 1)
-    l1f_all = torch.index_select(l1f_flat, 0, indices).contiguous()
-    l1f_main, l1f_out = torch.split(l1f_all, [L2, 1], dim=1)
+        l1x = l1c_main + l1f_main
+        l1x_sq = torch.pow(l1x, 2.0) * (127.0 / 128.0)
+        l1x_cat = torch.cat([l1x_sq, l1x], dim=1)
+        l1x_clamped = torch.clamp(l1x_cat, 0.0, 1.0)
 
-    # combine the main L2 parts (functional, non-inplace)
-    l1x = l1c_main + l1f_main
+        # ----- L2 path -----
+        l2s = self.l2(l1x_clamped).reshape(-1, self.count, L3)
+        l2s_flat = l2s.reshape(-1, L3)
+        l2c = torch.index_select(l2s_flat, 0, indices).contiguous()
+        l2x = torch.clamp(l2c, 0.0, 1.0)
 
-    # apply squared-crelu style transformation and stack with original
-    l1x_sq = torch.pow(l1x, 2.0) * (127.0 / 128.0)
-    l1x_cat = torch.cat([l1x_sq, l1x], dim=1)
-    l1x_clamped = torch.clamp(l1x_cat, 0.0, 1.0)
+        # ----- L3 / output path -----
+        l3s = self.output(l2x).reshape(-1, self.count, 1)
+        l3s_flat = l3s.reshape(-1, 1)
+        l3c = torch.index_select(l3s_flat, 0, indices).contiguous()
 
-    # ----- L2 path -----
-    l2s = self.l2(l1x_clamped).reshape(-1, self.count, L3)
-    l2s_flat = l2s.reshape(-1, L3)
-    l2c = torch.index_select(l2s_flat, 0, indices).contiguous()
-    l2x = torch.clamp(l2c, 0.0, 1.0)
-
-    # ----- L3 / output path -----
-    l3s = self.output(l2x).reshape(-1, self.count, 1)
-    l3s_flat = l3s.reshape(-1, 1)
-    l3c = torch.index_select(l3s_flat, 0, indices).contiguous()
-
-    # final combine - note all operands are real tensors produced above
-    l3x = l3c + l1f_out + l1c_out
-
-    return l3x
+        # final combine
+        l3x = l3c + l1f_out + l1c_out
+        return l3x
 
     def get_coalesced_layer_stacks(self):
         # During training the buckets are represented by a single, wider, layer.
