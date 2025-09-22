@@ -1,6 +1,7 @@
 import ranger21
 import torch
 from torch import nn
+from torch import Tensor
 import pytorch_lightning as pl
 from feature_transformer import DoubleFeatureTransformerSlice
 from dataclasses import dataclass
@@ -94,34 +95,55 @@ class LayerStacks(nn.Module):
         self.output.weight = nn.Parameter(output_weight)
         self.output.bias = nn.Parameter(output_bias)
 
-    def forward(self, x, ls_indices):
-        assert self.idx_offset is not None and self.idx_offset.shape[0] == x.shape[0]
 
-        indices = ls_indices.flatten() + self.idx_offset
+def forward(self, x: Tensor, ls_indices: Tensor):
+    # compute batched index offset (long)
+    idx_offset = torch.arange(
+        0, x.shape[0] * self.count, self.count, device=x.device, dtype=ls_indices.dtype
+    )
 
-        l1s_ = self.l1(x).reshape((-1, self.count, L2 + 1))
-        l1f_ = self.l1_fact(x)
-        # https://stackoverflow.com/questions/55881002/pytorch-tensor-indexing-how-to-gather-rows-by-tensor-containing-indices
-        # basically we present it as a list of individual results and pick not only based on
-        # the ls index but also based on batch (they are combined into one index)
-        l1c_ = l1s_.view(-1, L2 + 1)[indices]
-        l1c_, l1c_out = l1c_.split(L2, dim=1)
-        l1f_, l1f_out = l1f_.split(L2, dim=1)
-        l1x_ = l1c_ + l1f_
-        # multiply sqr crelu result by (127/128) to match quantized version
-        l1x_ = torch.clamp(
-            torch.cat([torch.pow(l1x_, 2.0) * (127 / 128), l1x_], dim=1), 0.0, 1.0
-        )
+    # combined indices into a single 1-d index for flattened (batch*count) rows
+    indices = (ls_indices.flatten() + idx_offset).to(torch.long)
 
-        l2s_ = self.l2(l1x_).reshape((-1, self.count, L3))
-        l2c_ = l2s_.view(-1, L3)[indices]
-        l2x_ = torch.clamp(l2c_, 0.0, 1.0)
+    # ----- L1 path -----
+    # l1 produces shape (..., self.count, L2+1)
+    l1s = self.l1(x).reshape(-1, self.count, L2 + 1)
+    # flatten the first two dims so we can index by `indices`
+    l1s_flat = l1s.reshape(-1, L2 + 1)
+    # use index_select instead of advanced indexing to get stable outputs
+    l1c_all = torch.index_select(l1s_flat, 0, indices).contiguous()
+    # split into the two parts explicitly: first L2, then the remaining 1
+    l1c_main, l1c_out = torch.split(l1c_all, [L2, 1], dim=1)
 
-        l3s_ = self.output(l2x_).reshape((-1, self.count, 1))
-        l3c_ = l3s_.view(-1, 1)[indices]
-        l3x_ = l3c_ + l1f_out + l1c_out
+    # l1_fact path: ensure same flattening shape before selecting
+    l1f = self.l1_fact(x)
+    l1f_flat = l1f.reshape(-1, L2 + 1)
+    l1f_all = torch.index_select(l1f_flat, 0, indices).contiguous()
+    l1f_main, l1f_out = torch.split(l1f_all, [L2, 1], dim=1)
 
-        return l3x_
+    # combine the main L2 parts (functional, non-inplace)
+    l1x = l1c_main + l1f_main
+
+    # apply squared-crelu style transformation and stack with original
+    l1x_sq = torch.pow(l1x, 2.0) * (127.0 / 128.0)
+    l1x_cat = torch.cat([l1x_sq, l1x], dim=1)
+    l1x_clamped = torch.clamp(l1x_cat, 0.0, 1.0)
+
+    # ----- L2 path -----
+    l2s = self.l2(l1x_clamped).reshape(-1, self.count, L3)
+    l2s_flat = l2s.reshape(-1, L3)
+    l2c = torch.index_select(l2s_flat, 0, indices).contiguous()
+    l2x = torch.clamp(l2c, 0.0, 1.0)
+
+    # ----- L3 / output path -----
+    l3s = self.output(l2x).reshape(-1, self.count, 1)
+    l3s_flat = l3s.reshape(-1, 1)
+    l3c = torch.index_select(l3s_flat, 0, indices).contiguous()
+
+    # final combine - note all operands are real tensors produced above
+    l3x = l3c + l1f_out + l1c_out
+
+    return l3x
 
     def get_coalesced_layer_stacks(self):
         # During training the buckets are represented by a single, wider, layer.
