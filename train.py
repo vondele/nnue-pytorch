@@ -334,25 +334,25 @@ def main():
         help="Skip positions that have abs(simple_eval(pos)) < n",
     )
     parser.add_argument(
-        "--pc-x2",
+        "--pc-y1",
         type=float,
-        default=15,
-        dest="pc_x2",
-        help="piece count parameter x2 (default=15)",
+        default=1.0,
+        dest="pc_y1",
+        help="piece count parameter y1 (default=1.0)",
     )
     parser.add_argument(
         "--pc-y2",
         type=float,
-        default=2,
+        default=2.0,
         dest="pc_y2",
-        help="piece count parameter y2 (default=2)",
+        help="piece count parameter y2 (default=2.0)",
     )
     parser.add_argument(
         "--pc-y3",
         type=float,
-        default=1,
+        default=1.0,
         dest="pc_y3",
-        help="piece count parameter y3 (default=1)",
+        help="piece count parameter y3 (default=1.0)",
     )
 
     parser.add_argument("--l1", type=int, default=M.ModelConfig().L1)
@@ -451,7 +451,7 @@ def main():
     print("Skip early plies: {}".format(args.early_fen_skipping))
     print("Skip simple eval : {}".format(args.simple_eval_skipping))
     print("Param index: {}".format(args.param_index))
-    print("piececount param x2 : {}".format(args.pc_x2))
+    print("piececount param y1 : {}".format(args.pc_y1))
     print("piececount param y2 : {}".format(args.pc_y2))
     print("piececount param y3 : {}".format(args.pc_y3))
 
@@ -506,7 +506,7 @@ def main():
             early_fen_skipping=args.early_fen_skipping,
             simple_eval_skipping=args.simple_eval_skipping,
             param_index=args.param_index,
-            pc_x2=args.pc_x2,
+            pc_y1=args.pc_y1,
             pc_y2=args.pc_y2,
             pc_y3=args.pc_y3,
         ),

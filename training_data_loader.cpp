@@ -963,7 +963,7 @@ struct DataloaderSkipConfig {
   int early_fen_skipping;
   int simple_eval_skipping;
   int param_index;
-  double pc_x2, pc_y2, pc_y3;
+  double pc_y1, pc_y2, pc_y3;
 };
 
 std::function<bool(const TrainingDataEntry &)>
@@ -981,8 +981,8 @@ make_skip_predicate(DataloaderSkipConfig config) {
 
       auto desired_piece_count_weights = [&config](int pc) -> double {
         double x = pc;
-        double x1 = 0, y1 = 1;
-        double x2 = config.pc_x2, y2 = config.pc_y2;
+        double x1 = 0, y1 = config.pc_y1;
+        double x2 = 16, y2 = config.pc_y2;
         double x3 = 32, y3 = config.pc_y3;
         double l1 = (x - x2) * (x - x3) / ((x1 - x2) * (x1 - x3));
         double l2 = (x - x1) * (x - x3) / ((x2 - x1) * (x2 - x3));
@@ -1268,9 +1268,9 @@ int main(int argc, char **argv) {
                                        .early_fen_skipping = 5,
                                        .simple_eval_skipping = 0,
                                        .param_index = 0,
-                                       .pc_x2 = 15.,
-                                       .pc_y2 = 2,
-                                       .pc_y3 = 1};
+                                       .pc_y1 = 1.0,
+                                       .pc_y2 = 2.0,
+                                       .pc_y3 = 1.0};
   auto stream =
       create_sparse_batch_stream("Full_Threats", concurrency, file_count, files,
                                  batch_size, cyclic, config);
