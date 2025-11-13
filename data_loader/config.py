@@ -10,6 +10,9 @@ class DataloaderSkipConfig:
     early_fen_skipping: int = -1
     simple_eval_skipping: int = -1
     param_index: int = 0
+    pc_x2: float = 15.0
+    pc_y2: float = 2.0
+    pc_y3: float = 1.0
 
 
 class CDataloaderSkipConfig(ctypes.Structure):
@@ -20,6 +23,9 @@ class CDataloaderSkipConfig(ctypes.Structure):
         ("early_fen_skipping", ctypes.c_int),
         ("simple_eval_skipping", ctypes.c_int),
         ("param_index", ctypes.c_int),
+        ("pc_x2", ctypes.c_double),
+        ("pc_y2", ctypes.c_double),
+        ("pc_y3", ctypes.c_double),
     ]
 
     def __init__(self, config: DataloaderSkipConfig):
@@ -30,4 +36,7 @@ class CDataloaderSkipConfig(ctypes.Structure):
             early_fen_skipping=config.early_fen_skipping,
             simple_eval_skipping=config.simple_eval_skipping,
             param_index=config.param_index,
+            pc_x2=config.pc_x2,
+            pc_y2=config.pc_y2,
+            pc_y3=config.pc_y3,
         )
