@@ -354,6 +354,20 @@ def main():
         dest="pc_y3",
         help="piece count parameter y3 (default=1.0)",
     )
+    parser.add_argument(
+        "--w1",
+        type=float,
+        default=0.0,
+        dest="w1",
+        help="weight boost parameter 1 (default=0.0)",
+    )
+    parser.add_argument(
+        "--w2",
+        type=float,
+        default=0.5,
+        dest="w2",
+        help="weight boost parameter 2 (default=0.5)",
+    )
 
     parser.add_argument("--l1", type=int, default=M.ModelConfig().L1)
     M.add_feature_args(parser)
@@ -399,6 +413,8 @@ def main():
         end_lambda=args.end_lambda or args.lambda_,
         pow_exp=args.pow_exp,
         qp_asymmetry=args.qp_asymmetry,
+        w1=args.w1,
+        w2=args.w2,
     )
     print("Loss parameters:")
     print(loss_params)
