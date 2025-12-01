@@ -22,3 +22,4 @@ class LossParams:
     qp_asymmetry: float = 0.0
     w1: float = 0.0
     w2: float = 0.5
+    tanh_scale: float = 0.5

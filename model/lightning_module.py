@@ -107,6 +107,8 @@ class NNUE(L.LightningModule):
         if p.qp_asymmetry != 0.0:
             loss = loss * ((qf > pt) * p.qp_asymmetry + 1)
 
+        loss = torch.tanh(loss / p.tanh_scale) * p.tanh_scale
+
         weights = 1 + (2.0**p.w1 - 1) * torch.pow((pf - 0.5) ** 2 * pf * (1 - pf), p.w2)
         loss = (loss * weights).sum() / weights.sum()
 

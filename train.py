@@ -368,6 +368,13 @@ def main():
         dest="w2",
         help="weight boost parameter 2 (default=0.5)",
     )
+    parser.add_argument(
+        "--tanh-scale",
+        type=float,
+        default=0.5,
+        dest="tanh_scale",
+        help="scale of the tanh loss transformation (default=0.5)",
+    )
 
     parser.add_argument("--l1", type=int, default=M.ModelConfig().L1)
     M.add_feature_args(parser)
@@ -415,6 +422,7 @@ def main():
         qp_asymmetry=args.qp_asymmetry,
         w1=args.w1,
         w2=args.w2,
+        tanh_scale=args.tanh_scale,
     )
     print("Loss parameters:")
     print(loss_params)
@@ -470,6 +478,9 @@ def main():
     print("piececount param y1 : {}".format(args.pc_y1))
     print("piececount param y2 : {}".format(args.pc_y2))
     print("piececount param y3 : {}".format(args.pc_y3))
+    print("weight w1 : {}".format(args.w1))
+    print("weight w2 : {}".format(args.w2))
+    print("tanh scale : {}".format(args.tanh_scale))
 
     if args.threads > 0:
         print("limiting torch to {} threads.".format(args.threads))
