@@ -25,5 +25,4 @@ exclude = [
     "node_modules",
     "site-packages",
     "venv",
-    "ranger21.py"
 ]
