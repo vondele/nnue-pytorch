@@ -1,5 +1,4 @@
 import lightning as L
-import ranger21
 import torch
 from torch import Tensor, nn
 
@@ -137,21 +136,8 @@ class NNUE(L.LightningModule):
             {"params": [self.model.layer_stacks.output.linear.bias], "lr": LR},
         ]
 
-        optimizer = ranger21.Ranger21(
-            train_params,
-            lr=1.0,
-            betas=(0.9, 0.999),
-            eps=1.0e-7,
-            using_gc=False,
-            using_normgc=False,
-            weight_decay=0.0,
-            num_batches_per_epoch=self.num_batches_per_epoch,
-            num_epochs=self.max_epoch,
-            warmdown_active=False,
-            use_warmup=False,
-            use_adaptive_gradient_clipping=False,
-            softplus=False,
-            pnm_momentum_factor=0.0,
+        optimizer = torch.optim.AdamW(
+            train_params, lr=1.0, betas=(0.9, 0.999), eps=1.0e-7, weight_decay=0.0
         )
 
         scheduler = torch.optim.lr_scheduler.StepLR(
