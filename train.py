@@ -511,6 +511,7 @@ def main():
         max_epochs=args.max_epochs,
         accelerator="cuda",
         devices=devices,
+        strategy="ddp",
         logger=tb_logger,
         callbacks=[
             checkpoint_callback,
