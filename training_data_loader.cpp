@@ -707,11 +707,11 @@ struct Stream: AnyStream {
     using StorageType = StorageT;
 
     Stream(int                                           concurrency,
-           const std::vector<std::string>&               filenames,
+           const std::vector<WeightedPath>&              weigthedPaths,
            bool                                          cyclic,
            std::function<bool(const TrainingDataEntry&)> skipPredicate) :
         m_stream(training_data::open_sfen_input_file_parallel(
-          concurrency, filenames, cyclic, skipPredicate)) {}
+          concurrency, weigthedPaths, cyclic, skipPredicate)) {}
 
     virtual StorageT* next() = 0;
 
@@ -724,10 +724,10 @@ struct AsyncStream: Stream<StorageT> {
     using BaseType = Stream<StorageT>;
 
     AsyncStream(int                                           concurrency,
-                const std::vector<std::string>&               filenames,
+                const std::vector<WeightedPath>&              weigthedPaths,
                 bool                                          cyclic,
                 std::function<bool(const TrainingDataEntry&)> skipPredicate) :
-        BaseType(1, filenames, cyclic, skipPredicate) {}
+        BaseType(1, weigthedPaths, cyclic, skipPredicate) {}
 
     ~AsyncStream() {
         if (m_next.valid())
@@ -750,12 +750,12 @@ struct FeaturedBatchStream: Stream<StorageT> {
     static constexpr int num_feature_threads_per_reading_thread = 2;
 
     FeaturedBatchStream(int                                           concurrency,
-                        const std::vector<std::string>&               filenames,
+                        const std::vector<WeightedPath>&              weigthedPaths,
                         int                                           batch_size,
                         bool                                          cyclic,
                         std::function<bool(const TrainingDataEntry&)> skipPredicate) :
         BaseType(std::max(1, concurrency / num_feature_threads_per_reading_thread),
-                 filenames,
+                 weigthedPaths,
                  cyclic,
                  skipPredicate),
         m_concurrency(concurrency),
@@ -916,7 +916,7 @@ struct FenBatchStream: Stream<FenBatch> {
     using BaseType = Stream<FenBatch>;
 
     FenBatchStream(int                                           concurrency,
-                   const std::vector<std::string>&               filenames,
+                   const std::vector<WeightedPath>&              filenames,
                    int                                           batch_size,
                    bool                                          cyclic,
                    std::function<bool(const TrainingDataEntry&)> skipPredicate) :
@@ -1237,8 +1237,11 @@ EXPORT FenBatchStream* CDECL create_fen_batch_stream(int                  concur
                                                      int                  batch_size,
                                                      bool                 cyclic,
                                                      DataloaderSkipConfig config) {
-    auto skipPredicate = make_skip_predicate(config);
-    auto filenames_vec = std::vector<std::string>(filenames, filenames + num_files);
+    auto skipPredicate     = make_skip_predicate(config);
+    auto filenames_vec_raw = std::vector<std::string>(filenames, filenames + num_files);
+
+    // TODO FIX INIT
+    std::vector<WeightedPath> filenames_vec;
 
     return new FenBatchStream(concurrency, filenames_vec, batch_size, cyclic, skipPredicate);
 }
@@ -1253,8 +1256,11 @@ EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char*        
                                                              int                  batch_size,
                                                              bool                 cyclic,
                                                              DataloaderSkipConfig config) {
-    auto skipPredicate = make_skip_predicate(config);
-    auto filenames_vec = std::vector<std::string>(filenames, filenames + num_files);
+    auto skipPredicate     = make_skip_predicate(config);
+    auto filenames_vec_raw = std::vector<std::string>(filenames, filenames + num_files);
+
+    // TODO FIX INIT
+    std::vector<WeightedPath> filenames_vec;
 
     std::string_view feature_set(feature_set_c);
     if (feature_set == "HalfKP")

@@ -7611,13 +7611,19 @@ namespace binpack
         }
     };
 
+    struct WeightedPath
+    {
+        std::string path;
+        double weight;
+    };
+
     struct CompressedTrainingDataEntryParallelReader
     {
         static constexpr std::size_t chunkSize = suggestedChunkSize;
 
         CompressedTrainingDataEntryParallelReader(
             int concurrency,
-            std::vector<std::string> paths,
+            std::vector<WeightedPath> weightedPaths,
             std::ios_base::openmode om = std::ios_base::app,
             bool cyclic = false,
             std::function<bool(const TrainingDataEntry&)> skipPredicate = nullptr
@@ -7628,20 +7634,21 @@ namespace binpack
             m_skipPredicate(std::move(skipPredicate))
         {
             m_numRunningWorkers.store(0);
-            std::vector<double> sizes; // discrete distribution wants double weights
-            for (const auto& path : paths)
+            std::vector<double> weights; // discrete distribution wants double weights
+            for (const auto& dataPath : weightedPaths)
             {
-                auto& file = m_inputFiles.emplace_back(path, om | std::ios_base::in);
+                auto& file = m_inputFiles.emplace_back(dataPath.path, om | std::ios_base::in);
 
                 if (!file.hasNextChunk())
                 {
                     return;
                 }
 
-                sizes.emplace_back(static_cast<double>(file.sizeBytes()));
+                weights.emplace_back(static_cast<double>(file.sizeBytes()) * dataPath.weight);
             }
 
-            m_inputFileDistribution = std::discrete_distribution<>(sizes.begin(), sizes.end());
+            // TODO: place to change ...
+            m_inputFileDistribution = std::discrete_distribution<>(weights.begin(), weights.end());
 
             m_stopFlag.store(false);
 

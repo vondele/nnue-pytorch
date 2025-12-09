@@ -185,9 +185,9 @@ namespace training_data {
         static constexpr auto openmode = std::ios::in | std::ios::binary;
         static inline const std::string extension = "binpack";
 
-        BinpackSfenInputParallelStream(int concurrency, const std::vector<std::string>& filenames, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
-            m_stream(std::make_unique<binpack::CompressedTrainingDataEntryParallelReader>(concurrency, filenames, openmode, cyclic, skipPredicate)),
-            m_filenames(filenames),
+        BinpackSfenInputParallelStream(int concurrency, const std::vector<WeightedPath>& weightedPaths, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
+            m_stream(std::make_unique<binpack::CompressedTrainingDataEntryParallelReader>(concurrency, weightedPaths, openmode, cyclic, skipPredicate)),
+            m_weightedPaths(weightedPaths),
             m_concurrency(concurrency),
             m_eof(false),
             m_cyclic(cyclic),
@@ -226,7 +226,7 @@ namespace training_data {
 
     private:
         std::unique_ptr<binpack::CompressedTrainingDataEntryParallelReader> m_stream;
-        std::vector<std::string> m_filenames;
+        std::vector<WeightedPath> m_weightedPaths;
         int m_concurrency;
         bool m_eof;
         bool m_cyclic;
@@ -243,13 +243,13 @@ namespace training_data {
         return nullptr;
     }
 
-    inline std::unique_ptr<BasicSfenInputStream> open_sfen_input_file_parallel(int concurrency, const std::vector<std::string>& filenames, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate = nullptr)
+    inline std::unique_ptr<BasicSfenInputStream> open_sfen_input_file_parallel(int concurrency, const std::vector<WeightedPath>& weightedPaths, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate = nullptr)
     {
         // TODO (low priority): optimize and parallelize .bin reading.
-        if (has_extension(filenames[0], BinSfenInputStream::extension))
-            return std::make_unique<BinSfenInputStream>(filenames[0], cyclic, std::move(skipPredicate));
-        else if (has_extension(filenames[0], BinpackSfenInputParallelStream::extension))
-            return std::make_unique<BinpackSfenInputParallelStream>(concurrency, filenames, cyclic, std::move(skipPredicate));
+        if (has_extension(weightedPaths[0].path, BinSfenInputStream::extension))
+            return std::make_unique<BinSfenInputStream>(weightedPaths[0].path, cyclic, std::move(skipPredicate));
+        else if (has_extension(weightedPaths[0].path, BinpackSfenInputParallelStream::extension))
+            return std::make_unique<BinpackSfenInputParallelStream>(concurrency, weightedPaths, cyclic, std::move(skipPredicate));
 
         return nullptr;
     }
