@@ -1240,8 +1240,9 @@ EXPORT FenBatchStream* CDECL create_fen_batch_stream(int                  concur
     auto skipPredicate     = make_skip_predicate(config);
     auto filenames_vec_raw = std::vector<std::string>(filenames, filenames + num_files);
 
-    // TODO FIX INIT
     std::vector<WeightedPath> filenames_vec;
+    for (int i = 0; i < filenames_vec_raw.size(); i++)
+        filenames_vec.push_back(WeightedPath{filenames_vec_raw[i], 1.0});
 
     return new FenBatchStream(concurrency, filenames_vec, batch_size, cyclic, skipPredicate);
 }
@@ -1259,8 +1260,9 @@ EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char*        
     auto skipPredicate     = make_skip_predicate(config);
     auto filenames_vec_raw = std::vector<std::string>(filenames, filenames + num_files);
 
-    // TODO FIX INIT
     std::vector<WeightedPath> filenames_vec;
+    for (int i = 0; i < filenames_vec_raw.size(); i++)
+        filenames_vec.push_back(WeightedPath{filenames_vec_raw[i], 1.0});
 
     std::string_view feature_set(feature_set_c);
     if (feature_set == "HalfKP")

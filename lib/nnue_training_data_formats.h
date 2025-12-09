@@ -7647,7 +7647,6 @@ namespace binpack
                 weights.emplace_back(static_cast<double>(file.sizeBytes()) * dataPath.weight);
             }
 
-            // TODO: place to change ...
             m_inputFileDistribution = std::discrete_distribution<>(weights.begin(), weights.end());
 
             m_stopFlag.store(false);
