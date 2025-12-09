@@ -1234,6 +1234,7 @@ EXPORT SparseBatch* get_sparse_batch_from_fens(const char*        feature_set_c,
 EXPORT FenBatchStream* CDECL create_fen_batch_stream(int                  concurrency,
                                                      int                  num_files,
                                                      const char* const*   filenames,
+                                                     const double* const  weights,
                                                      int                  batch_size,
                                                      bool                 cyclic,
                                                      DataloaderSkipConfig config) {
@@ -1242,7 +1243,7 @@ EXPORT FenBatchStream* CDECL create_fen_batch_stream(int                  concur
 
     std::vector<WeightedPath> filenames_vec;
     for (int i = 0; i < filenames_vec_raw.size(); i++)
-        filenames_vec.push_back(WeightedPath{filenames_vec_raw[i], 1.0});
+        filenames_vec.push_back(WeightedPath{filenames_vec_raw[i], weights[i]});
 
     return new FenBatchStream(concurrency, filenames_vec, batch_size, cyclic, skipPredicate);
 }
@@ -1254,6 +1255,7 @@ EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char*        
                                                              int                  concurrency,
                                                              int                  num_files,
                                                              const char* const*   filenames,
+                                                             const double* const  weights,
                                                              int                  batch_size,
                                                              bool                 cyclic,
                                                              DataloaderSkipConfig config) {
@@ -1262,7 +1264,7 @@ EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char*        
 
     std::vector<WeightedPath> filenames_vec;
     for (int i = 0; i < filenames_vec_raw.size(); i++)
-        filenames_vec.push_back(WeightedPath{filenames_vec_raw[i], 1.0});
+        filenames_vec.push_back(WeightedPath{filenames_vec_raw[i], weights[i]});
 
     std::string_view feature_set(feature_set_c);
     if (feature_set == "HalfKP")
@@ -1366,6 +1368,9 @@ int main(int argc, char** argv) {
     }
     const char** files      = const_cast<const char**>(&argv[1]);
     int          file_count = argc - 1;
+    double       weights[file_count];
+    for (int i = 0; i < file_count; i++)
+        weights[i] = 1.0;
 
     #ifdef PGO_BUILD
     const int concurrency = 1;
@@ -1385,7 +1390,7 @@ int main(int argc, char** argv) {
                                              .pc_y2                = 2.0,
                                              .pc_y3                = 1.0};
     auto stream = create_sparse_batch_stream("Full_Threats^", concurrency, file_count, files,
-                                             batch_size, cyclic, config);
+                                             weights, batch_size, cyclic, config);
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
