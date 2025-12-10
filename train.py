@@ -15,6 +15,9 @@ from lightning.pytorch.callbacks import TQDMProgressBar, Callback, ModelCheckpoi
 import data_loader
 import model as M
 
+import faulthandler
+faulthandler.enable()
+
 warnings.filterwarnings("ignore", ".*does not have many workers.*")
 
 
@@ -51,11 +54,15 @@ def make_data_loaders(
     epoch_size,
     val_size,
 ):
+    train_weights = [1.0] * len(train_filenames)
+    val_weights = [1.0] * len(val_filenames)
+
     # Epoch and validation sizes are arbitrary
     features_name = feature_set.name
     train_infinite = data_loader.SparseBatchDataset(
         features_name,
         train_filenames,
+        train_weights,
         batch_size,
         num_workers=num_workers,
         config=config,
@@ -63,6 +70,7 @@ def make_data_loaders(
     val_infinite = data_loader.SparseBatchDataset(
         features_name,
         val_filenames,
+        val_weights,
         batch_size,
         config=config,
     )

@@ -13,6 +13,7 @@ def _to_c_str_array(str_list):
 def create_fen_batch_stream(
     concurrency,
     filenames: list[str],
+    weights: list[float],
     batch_size,
     cyclic,
     config: DataloaderSkipConfig,
@@ -21,6 +22,7 @@ def create_fen_batch_stream(
         concurrency,
         len(filenames),
         _to_c_str_array(filenames),
+        (ctypes.c_double * len(weights))(*weights),
         batch_size,
         cyclic,
         CDataloaderSkipConfig(config),
@@ -43,15 +45,19 @@ def create_sparse_batch_stream(
     feature_set: str,
     concurrency,
     filenames: list[str],
+    weights: list[float],
     batch_size,
     cyclic,
     config: DataloaderSkipConfig,
 ) -> ctypes.c_void_p:
+    print(weights)
+
     return c_lib.dll.create_sparse_batch_stream(
         feature_set,
         concurrency,
         len(filenames),
         _to_c_str_array(filenames),
+        (ctypes.c_double * len(weights))(*weights),
         batch_size,
         cyclic,
         CDataloaderSkipConfig(config),

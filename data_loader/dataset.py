@@ -25,7 +25,7 @@ class FenBatchProvider:
 
         if batch_size:
             self.stream = stream.create_fen_batch_stream(
-                self.num_workers, [self.filename], batch_size, cyclic, config
+                self.num_workers, [self.filename], [1.0], batch_size, cyclic, config
             )
         else:
             # doesnt work yet
@@ -63,6 +63,7 @@ class TrainingDataProvider:
         fetch_next,
         destroy_part,
         filenames: list[str],
+        weights: list[float],
         cyclic,
         num_workers,
         batch_size=None,
@@ -74,6 +75,7 @@ class TrainingDataProvider:
         self.fetch_next = fetch_next
         self.destroy_part = destroy_part
         self.filenames = filenames
+        self.weights = weights
         self.cyclic = cyclic
         self.num_workers = num_workers
         self.batch_size = batch_size
@@ -84,13 +86,19 @@ class TrainingDataProvider:
                 self.feature_set,
                 self.num_workers,
                 self.filenames,
+                self.weights,
                 batch_size,
                 cyclic,
                 config,
             )
         else:
             self.stream = self.create_stream(
-                self.feature_set, self.num_workers, self.filenames, cyclic, config
+                self.feature_set,
+                self.num_workers,
+                self.filenames,
+                self.weights,
+                cyclic,
+                config,
             )
 
     def __iter__(self):
@@ -115,6 +123,7 @@ class SparseBatchProvider(TrainingDataProvider):
         self,
         feature_set: str,
         filenames: list[str],
+        weights: list[float],
         batch_size,
         cyclic=True,
         num_workers=1,
@@ -127,6 +136,7 @@ class SparseBatchProvider(TrainingDataProvider):
             stream.fetch_next_sparse_batch,
             stream.destroy_sparse_batch,
             filenames,
+            weights,
             cyclic,
             num_workers,
             batch_size,
@@ -139,6 +149,7 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         self,
         feature_set: str,
         filenames: list[str],
+        weights: list[float],
         batch_size,
         cyclic=True,
         num_workers=1,
@@ -147,6 +158,7 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         super().__init__()
         self.feature_set = feature_set
         self.filenames = filenames
+        self.weights = weights
         self.batch_size = batch_size
         self.cyclic = cyclic
         self.num_workers = num_workers
@@ -156,6 +168,7 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         return SparseBatchProvider(
             self.feature_set,
             self.filenames,
+            self.weights,
             self.batch_size,
             cyclic=self.cyclic,
             num_workers=self.num_workers,

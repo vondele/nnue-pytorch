@@ -142,6 +142,7 @@ class CDataLoaderAPI:
         #     int concurrency,
         #     int num_files,
         #     const char* const* filenames,
+        #     const double const* weights,
         #     int batch_size,
         #     bool cyclic,
         #     DataloaderSkipConfig config
@@ -151,6 +152,7 @@ class CDataLoaderAPI:
             ctypes.c_int,
             ctypes.c_int,
             ctypes.POINTER(ctypes.c_char_p),
+            ctypes.POINTER(ctypes.c_double),
             ctypes.c_int,
             ctypes.c_bool,
             CDataloaderSkipConfig,
@@ -168,6 +170,7 @@ class CDataLoaderAPI:
         #     int concurrency,
         #     int num_files,
         #     const char* const* filenames,
+        #     const double const* weights,
         #     int batch_size,
         #     bool cyclic,
         #     DataloaderSkipConfig config
@@ -178,6 +181,7 @@ class CDataLoaderAPI:
             ctypes.c_int,
             ctypes.c_int,
             ctypes.POINTER(ctypes.c_char_p),
+            ctypes.POINTER(ctypes.c_double),
             ctypes.c_int,
             ctypes.c_bool,
             CDataloaderSkipConfig,
