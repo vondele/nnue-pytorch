@@ -50,8 +50,6 @@ def create_sparse_batch_stream(
     cyclic,
     config: DataloaderSkipConfig,
 ) -> ctypes.c_void_p:
-    print(weights)
-
     return c_lib.dll.create_sparse_batch_stream(
         feature_set,
         concurrency,

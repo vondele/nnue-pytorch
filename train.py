@@ -16,6 +16,7 @@ import data_loader
 import model as M
 
 import faulthandler
+
 faulthandler.enable()
 
 warnings.filterwarnings("ignore", ".*does not have many workers.*")
@@ -47,6 +48,7 @@ class TimeLimitAfterCheckpoint(Callback):
 def make_data_loaders(
     train_filenames,
     val_filenames,
+    weights,
     feature_set: M.FeatureSet,
     num_workers,
     batch_size,
@@ -54,19 +56,18 @@ def make_data_loaders(
     epoch_size,
     val_size,
 ):
-    train_weights = [1.0] * len(train_filenames)
-    val_weights = [1.0] * len(val_filenames)
-
     # Epoch and validation sizes are arbitrary
     features_name = feature_set.name
     train_infinite = data_loader.SparseBatchDataset(
         features_name,
         train_filenames,
-        train_weights,
+        weights,
         batch_size,
         num_workers=num_workers,
         config=config,
     )
+
+    val_weights = [1.0] * len(val_filenames)
     val_infinite = data_loader.SparseBatchDataset(
         features_name,
         val_filenames,
@@ -115,6 +116,13 @@ def main():
         action="append",
         nargs="+",
         help="Training datasets (.binpack). Interleaved at chunk level if multiple specified. Same data is used for training and validation if not validation data is specified.",
+    )
+    parser.add_argument(
+        "--datasets-weight",
+        type=lambda s: [float(x.strip()) for x in s.strip("[]").split(",")],
+        action="append",
+        dest="datasets_weight",
+        help="Weights for the datasets as comma-separated list (e.g., [1.5,2.0]). If not specified all datasets are equally weighted.",
     )
     parser.add_argument(
         "--default_root_dir",
@@ -400,6 +408,14 @@ def main():
     if len(args.validation_datasets) > 0:
         val_datasets = args.validation_datasets
 
+    if args.datasets_weight:
+        args.datasets_weight = flatten_once(args.datasets_weight)
+        assert len(args.datasets_weight) == len(args.datasets), (
+            "If datasets weights are specified, there must be exactly one weight per dataset."
+        )
+    else:
+        args.datasets_weight = [1.0] * len(args.datasets)
+
     if (args.start_lambda is not None) != (args.end_lambda is not None):
         raise Exception(
             "Either both or none of start_lambda and end_lambda must be specified."
@@ -464,6 +480,8 @@ def main():
     print("Num features: {}".format(feature_set.num_features))
 
     print("Training with: {}".format(train_datasets))
+    print("Datasets weights: {}".format(args.datasets_weight))
+
     print("Validating with: {}".format(val_datasets))
 
     L.seed_everything(args.seed)
@@ -522,6 +540,7 @@ def main():
     train, val = make_data_loaders(
         train_datasets,
         val_datasets,
+        args.datasets_weight,
         feature_set,
         args.num_workers,
         batch_size,
