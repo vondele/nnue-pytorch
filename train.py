@@ -222,6 +222,15 @@ def main():
         "--lr", default=8.75e-4, type=float, dest="lr", help="Initial learning rate."
     )
     parser.add_argument(
+        "--beta1", default=0.9, type=float, dest="beta1", help="Ranger21 beta1."
+    )
+    parser.add_argument(
+        "--beta2", default=0.999, type=float, dest="beta2", help="Ranger21 beta2."
+    )
+    parser.add_argument(
+        "--eps", default=1.0e-7, type=float, dest="eps", help="Ranger21 eps."
+    )
+    parser.add_argument(
         "--num-workers",
         default=1,
         type=int,
@@ -432,6 +441,9 @@ def main():
             num_batches_per_epoch=args.epoch_size / batch_size,
             gamma=args.gamma,
             lr=args.lr,
+            beta1=args.beta1,
+            beta2=args.beta2,
+            eps=args.eps,
             param_index=args.param_index,
             config=M.ModelConfig(L1=args.l1),
             quantize_config=M.QuantizationConfig(),
@@ -452,6 +464,9 @@ def main():
         # from .pt the optimizer is only created after the training is started
         nnue.gamma = args.gamma
         nnue.lr = args.lr
+        nnue.beta1 = args.beta1
+        nnue.beta2 = args.beta2
+        nnue.eps = args.eps
         nnue.param_index = args.param_index
 
     print("Feature set: {}".format(feature_set.name))
