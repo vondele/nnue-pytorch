@@ -435,6 +435,7 @@ def main():
             param_index=args.param_index,
             config=M.ModelConfig(L1=args.l1),
             quantize_config=M.QuantizationConfig(),
+            teacher_ckpt_path="",
         )
     else:
         assert os.path.exists(args.resume_from_model)

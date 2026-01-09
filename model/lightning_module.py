@@ -31,6 +31,7 @@ class NNUE(L.LightningModule):
         feature_set: FeatureSet,
         config: ModelConfig,
         quantize_config: QuantizationConfig,
+        teacher_ckpt_path=None,
         max_epoch=800,
         num_batches_per_epoch=int(100_000_000 / 16384),
         gamma=0.992,
@@ -41,9 +42,25 @@ class NNUE(L.LightningModule):
         loss_params=LossParams(),
     ):
         super().__init__()
+
         self.model: NNUEModel = NNUEModel(
             feature_set, config, quantize_config, num_psqt_buckets, num_ls_buckets
         )
+
+        # hardcode L1 right now.
+        self.teacher_model: NNUEModel = NNUEModel(
+            feature_set,
+            ModelConfig(L1=256),
+            quantize_config,
+            num_psqt_buckets,
+            num_ls_buckets,
+        )
+        self.teacher_ckpt_path = teacher_ckpt_path
+
+        self.teacher_model.eval()
+        for p in self.teacher_model.parameters():
+            p.requires_grad = False
+
         self.loss_params = loss_params
         self.max_epoch = max_epoch
         self.num_batches_per_epoch = num_batches_per_epoch
@@ -69,6 +86,22 @@ class NNUE(L.LightningModule):
             psqt_indices,
             layer_stack_indices,
         ) = batch
+
+        if self.teacher_model is not None:
+            with torch.no_grad():
+                score = (
+                    self.teacher_model(
+                        us,
+                        them,
+                        white_indices,
+                        white_values,
+                        black_indices,
+                        black_values,
+                        psqt_indices,
+                        layer_stack_indices,
+                    )
+                    * self.teacher_model.quantization.nnue2score
+                )
 
         scorenet = (
             self.model(
@@ -122,6 +155,22 @@ class NNUE(L.LightningModule):
 
     def test_step(self, batch, batch_idx):
         self.step_(batch, batch_idx, "test_loss")
+
+    def on_fit_start(self):
+        if self.teacher_ckpt_path is None:
+            raise RuntimeError("teacher_ckpt_path must be provided")
+        ckpt = torch.load(self.teacher_ckpt_path, map_location="cpu")
+        state_dict = ckpt.get("state_dict", ckpt)
+        teacher_state = {
+            k.replace("model.", "", 1): v
+            for k, v in state_dict.items()
+            if k.startswith("model.")
+        }
+        self.teacher_model.load_state_dict(teacher_state, strict=True)
+        self.teacher_model.eval()
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["teacher_model"] = None
 
     def configure_optimizers(self):
         LR = self.lr
