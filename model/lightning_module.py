@@ -50,7 +50,7 @@ class NNUE(L.LightningModule):
         # hardcode L1 right now.
         self.teacher_model: NNUEModel = NNUEModel(
             feature_set,
-            ModelConfig(L1=256),
+            ModelConfig(L1=8192),
             quantize_config,
             num_psqt_buckets,
             num_ls_buckets,

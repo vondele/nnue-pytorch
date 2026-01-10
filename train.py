@@ -435,7 +435,7 @@ def main():
             param_index=args.param_index,
             config=M.ModelConfig(L1=args.l1),
             quantize_config=M.QuantizationConfig(),
-            teacher_ckpt_path="",
+            teacher_ckpt_path="/workspace/scratch/teacher/last.ckpt",
         )
     else:
         assert os.path.exists(args.resume_from_model)
@@ -445,6 +445,18 @@ def main():
             raise RuntimeError(
                 f"Could not load checkpoint: {e}. The model to be resumed was probably saved with a different version of the code."
             )
+
+        # hardcode L1 right now.
+        nnue.teacher_model: NNUEModel = M.NNUEModel(
+            feature_set,
+            M.ModelConfig(L1=8192),
+            M.QuantizationConfig(),
+        )
+        nnue.teacher_ckpt_path = "/workspace/scratch/teacher/last.ckpt"
+        nnue.teacher_model.eval()
+        for p in nnue.teacher_model.parameters():
+            p.requires_grad = False
+
         nnue.model.set_feature_set(feature_set)
         nnue.loss_params = loss_params
         nnue.max_epoch = max_epoch
