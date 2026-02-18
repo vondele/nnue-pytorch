@@ -49,8 +49,7 @@ class NNUEModel(nn.Module):
         weights = self.input.weight
         with torch.no_grad():
             for a, b in self.feature_set.get_virtual_feature_ranges():
-                weights[a:b, :] = 0.0
-        self.input.weight = nn.Parameter(weights)
+                self.input.weight[a:b, :].zero_()
 
     def _init_psqt(self):
         input_weights = self.input.weight
@@ -78,9 +77,6 @@ class NNUEModel(nn.Module):
                 # just for the sake of it. It might still diverge away from 0
                 # due to gradient imprecision but it won't change anything.
                 input_bias[self.L1 + i] = 0.0
-
-        self.input.weight = nn.Parameter(input_weights)
-        self.input.bias = nn.Parameter(input_bias)
 
     def clip_weights(self):
         """
@@ -120,11 +116,9 @@ class NNUEModel(nn.Module):
     def clip_threat_weights(self):
         if self.feature_set.name.startswith("Full_Threats"):
             p = self.input.weight[0:self.threat_features]
-            p_data_fp32 = p.data
             min_weight = -128 / 255
             max_weight = 127 / 255
-            p_data_fp32.clamp_(min_weight, max_weight)
-            p.data.copy_(p_data_fp32)
+            p.data.clamp_(min_weight, max_weight)
 
     def set_feature_set(self, new_feature_set: FeatureSet):
         """
@@ -161,12 +155,7 @@ class NNUEModel(nn.Module):
         # we only have to add the virtual feature on top of the already existing real ones.
         if old_feature_block.name == next(iter(new_feature_block.factors)):
             # We can just extend with zeros since it's unfactorized -> factorized
-            weights = self.input.weight
-            padding = weights.new_zeros(
-                (new_feature_block.num_virtual_features, weights.shape[1])
-            )
-            weights = torch.cat([weights, padding], dim=0)
-            self.input.weight = nn.Parameter(weights)
+            self.input.expand_input_layer(new_feature_block.num_virtual_features)
             self.feature_set = new_feature_set
         else:
             raise Exception(
