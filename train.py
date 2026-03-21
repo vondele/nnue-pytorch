@@ -18,6 +18,8 @@ import tyro
 
 from config import TrainingConfig
 
+import cdbdirect
+
 warnings.filterwarnings("ignore", ".*does not have many workers.*")
 
 
@@ -249,6 +251,14 @@ def main():
 
     logdir = args.default_root_dir if args.default_root_dir else "logs/"
     tb_logger = pl_loggers.TensorBoardLogger(logdir)
+
+    # test cdbdirect, if CHESSDB_PATH is not set it will fail
+    db_path = os.environ.get("CHESSDB_PATH", "/")
+
+    db = cdbdirect.CDB(db_path)
+    print(f"Database contains {db.size()} entries.")
+
+    print("Startpos: ", db.get("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"))
 
     if is_master_process():
         print(
