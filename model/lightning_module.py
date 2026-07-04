@@ -52,7 +52,7 @@ def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
     # s = (score - loss_params.out_offset) / loss_params.out_scaling
     # sm = (-score - loss_params.out_offset) / loss_params.out_scaling
     # pf = 0.5 * (1.0 + s.sigmoid() - sm.sigmoid())
-    pf = (score + 1.0) / 2.0
+    pf = (score + 32000.0) / (2.0 * 32000.0)
 
     # blend that eval based score with the actual game outcome
     t = outcome
