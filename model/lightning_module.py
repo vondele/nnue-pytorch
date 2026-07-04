@@ -19,10 +19,7 @@ def _get_parameters(layers: list[nn.Module], get_biases: bool = False):
 
 
 def remap_tablebase_score(
-    score: Tensor,
-    base: float,
-    scale: float,
-    decay: float
+    score: Tensor, base: float, scale: float, decay: float
 ) -> Tensor:
     mate_score = 32000
     max_mate_ply = 245
@@ -32,7 +29,7 @@ def remap_tablebase_score(
     is_mate = abs_score >= tb_mate_threshold
 
     plies = (mate_score - abs_score).clamp(min=0)
-    remapped_abs = base + (decay ** plies) * scale
+    remapped_abs = base + (decay**plies) * scale
     remapped_score = torch.where(score < 0, -remapped_abs, remapped_abs)
 
     return torch.where(is_mate, remapped_score, score)
@@ -43,7 +40,7 @@ def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
         score,
         base=loss_params.tb_remap_base,
         scale=loss_params.tb_remap_scale,
-        decay=loss_params.tb_remap_decay
+        decay=loss_params.tb_remap_decay,
     )
 
     # convert the network and search scores to an estimate match result
@@ -52,9 +49,10 @@ def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
     qm = (-scorenet - loss_params.in_offset) / loss_params.in_scaling
     qf = 0.5 * (1.0 + q.sigmoid() - qm.sigmoid())
 
-    s = (score - loss_params.out_offset) / loss_params.out_scaling
-    sm = (-score - loss_params.out_offset) / loss_params.out_scaling
-    pf = 0.5 * (1.0 + s.sigmoid() - sm.sigmoid())
+    # s = (score - loss_params.out_offset) / loss_params.out_scaling
+    # sm = (-score - loss_params.out_offset) / loss_params.out_scaling
+    # pf = 0.5 * (1.0 + s.sigmoid() - sm.sigmoid())
+    pf = (score + 1.0) / 2.0
 
     # blend that eval based score with the actual game outcome
     t = outcome
@@ -66,14 +64,15 @@ def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
     if loss_params.qp_asymmetry != 0.0:
         loss = loss * ((qf > pt) * loss_params.qp_asymmetry + 1)
 
-    weights = 1 + (2.0**loss_params.w1 - 1) * torch.pow((pf - 0.5) ** 2 * pf * (1 - pf), loss_params.w2)
+    weights = 1 + (2.0**loss_params.w1 - 1) * torch.pow(
+        (pf - 0.5) ** 2 * pf * (1 - pf), loss_params.w2
+    )
     loss = (loss * weights).sum() / weights.sum()
 
     return loss
 
 
 class NNUE(L.LightningModule):
-
     def __init__(
         self,
         config: NNUELightningConfig,
@@ -261,16 +260,14 @@ class NNUE(L.LightningModule):
             score,
             piece_count,
         ) = batch
-        scorenet = (
-            self.model(
-                us,
-                them,
-                white_indices,
-                black_indices,
-                piece_count,
-                self.config.use_fake_act_quantization,
-                self.config.use_fake_weight_quantization
-            )
+        scorenet = self.model(
+            us,
+            them,
+            white_indices,
+            black_indices,
+            piece_count,
+            self.config.use_fake_act_quantization,
+            self.config.use_fake_weight_quantization,
         )
 
         scorenet = scorenet * self.model.quantization.nnue2score
@@ -280,7 +277,7 @@ class NNUE(L.LightningModule):
             current_epoch=self.current_epoch,
             max_epoch=self.max_epoch,
             is_training=self.training,
-            scorenet=scorenet
+            scorenet=scorenet,
         )
 
         sf_loss = calculate_sf_loss(
