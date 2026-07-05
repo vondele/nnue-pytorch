@@ -36,12 +36,12 @@ def remap_tablebase_score(
 
 
 def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
-    score = remap_tablebase_score(
-        score,
-        base=loss_params.tb_remap_base,
-        scale=loss_params.tb_remap_scale,
-        decay=loss_params.tb_remap_decay,
-    )
+    # score = remap_tablebase_score(
+    #    score,
+    #    base=loss_params.tb_remap_base,
+    #    scale=loss_params.tb_remap_scale,
+    #    decay=loss_params.tb_remap_decay,
+    # )
 
     # convert the network and search scores to an estimate match result
     # based on the win_rate_model, with scalings and offsets optimized
