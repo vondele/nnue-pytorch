@@ -18,6 +18,9 @@ class TrainingConfig:
     datasets: Positional[tuple[str, ...]] = ()
     """Training datasets (.binpack). Interleaved at chunk level if multiple specified. Same data is used for training and validation if no validation data is specified."""
 
+    cdb_path: str | None = None
+    """Path to a local cdb dump to use as a training source (standalone or mixed with binpacks)."""
+
     validation_datasets: UseAppendAction[tuple[str, ...]] = ()
     """Validation data to use for validation instead of the training data."""
 
@@ -101,8 +104,8 @@ class TrainingConfig:
         return max(1, self.epoch_size // self.batch_size)
 
     def __post_init__(self):
-        if not self.datasets:
-            raise ValueError("Argument `datasets` is required.")
+        if not self.datasets and not self.cdb_path:
+            raise ValueError("Argument `datasets` or `cdb_path` is required.")
         if self.max_epochs <= 0 or self.epoch_size <= 0 or self.batch_size <= 0:
             raise ValueError(
                 "Arguments `max_epochs`, `epoch_size` and `batch_size` must be positive."

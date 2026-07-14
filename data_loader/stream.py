@@ -95,6 +95,36 @@ def destroy_sparse_batch_stream(stream: ctypes.c_void_p):
     c_lib.dll.destroy_sparse_batch_stream(stream)
 
 
+def create_cdb_sparse_batch_stream(
+    feature_set: str,
+    db_path: str,
+    concurrency,
+    batch_size,
+    cyclic,
+    config: DataloaderSkipConfig,
+    ddp_config: DataloaderDDPConfig = None,
+) -> ctypes.c_void_p:
+    if ddp_config is None:
+        rank, world_size = _get_ddp_rank_and_world_size()
+        ddp_config = DataloaderDDPConfig(rank=rank, world_size=world_size)
+
+    stream = c_lib.dll.create_cdb_sparse_batch_stream(
+        feature_set.encode("utf-8"),
+        db_path.encode("utf-8"),
+        concurrency,
+        batch_size,
+        cyclic,
+        CDataloaderSkipConfig(config),
+        CDataloaderDDPConfig(ddp_config),
+    )
+    if stream is None:
+        raise RuntimeError(
+            "CDB support is not compiled into the data loader library. "
+            "Rebuild with -DWITH_CDB=ON."
+        )
+    return stream
+
+
 def get_sparse_batch_from_fens(
     feature_set: str, fens, scores, plies, results
 ) -> SparseBatchPtr:

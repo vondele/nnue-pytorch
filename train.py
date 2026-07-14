@@ -42,19 +42,32 @@ def make_data_loaders(
     prefetch_device=None,
     rank=0,
     world_size=1,
+    cdb_path=None,
 ):
     # Epoch and validation sizes are global; shard across DDP ranks.
     features_name = feature_name
     effective_batch_size = batch_size * world_size
     train_num_batches = max(1, epoch_size // effective_batch_size)
-    train_infinite = data_loader.SparseBatchDataset(
-        features_name,
-        train_filenames,
-        batch_size,
-        num_workers=num_workers,
-        config=config,
-        ddp_config=DataloaderDDPConfig(rank=rank, world_size=world_size),
-    )
+
+    if cdb_path is not None:
+        train_infinite = data_loader.CDBSparseBatchDataset(
+            features_name,
+            cdb_path,
+            batch_size,
+            cyclic=True,
+            num_workers=num_workers,
+            config=config,
+            ddp_config=DataloaderDDPConfig(rank=rank, world_size=world_size),
+        )
+    else:
+        train_infinite = data_loader.SparseBatchDataset(
+            features_name,
+            train_filenames,
+            batch_size,
+            num_workers=num_workers,
+            config=config,
+            ddp_config=DataloaderDDPConfig(rank=rank, world_size=world_size),
+        )
     # num_workers has to be 0 for sparse, and 1 for dense
     # it currently cannot work in parallel mode but it shouldn't need to
     train = DataLoader(
@@ -145,9 +158,13 @@ def main():
     args = tyro.cli(TrainingConfig)
     actual_threads, actual_workers = args.threads, args.num_workers
 
-    for dataset in args.datasets:
-        if not os.path.exists(dataset):
-            raise RuntimeError(f"{dataset} does not exist")
+    if args.cdb_path is not None and not os.path.exists(args.cdb_path):
+        raise RuntimeError(f"{args.cdb_path} does not exist")
+
+    if args.cdb_path is None:
+        for dataset in args.datasets:
+            if not os.path.exists(dataset):
+                raise RuntimeError(f"{dataset} does not exist")
 
     for val_dataset in args.validation_datasets:
         if not os.path.exists(val_dataset):
@@ -155,6 +172,9 @@ def main():
 
     train_datasets = args.datasets
     val_datasets = None
+
+    if args.cdb_path is not None:
+        train_datasets = None
 
     if len(args.validation_datasets) > 0:
         val_datasets = args.validation_datasets
@@ -273,7 +293,10 @@ def main():
         print(f"Feature set: {feature_name}")
         print(f"Num inputs: {nnue.model.input.NUM_INPUTS}")
 
-        print(f"Training with: {train_datasets}")
+        if args.cdb_path is not None:
+            print(f"Training with cdb: {args.cdb_path}")
+        else:
+            print(f"Training with: {train_datasets}")
         print(f"Validating with: {val_datasets}")
         print(f"Seed {args.seed}")
         print(args.dataloader_config)
@@ -316,6 +339,7 @@ def main():
         prefetch_device=device if accelerator == "cuda" else None,
         rank=rank,
         world_size=world_size,
+        cdb_path=args.cdb_path,
     )
 
     optimizer_and_schedulers = nnue.configure_optimizers()
@@ -401,5 +425,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    if sys.platform == "win32":
-        os._exit(0)

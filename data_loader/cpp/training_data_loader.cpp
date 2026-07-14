@@ -564,12 +564,122 @@ FeaturedBatchStream::FeaturedBatchStream(
   std::function<bool(const TrainingDataEntry&)> skipPredicate,
   int                                           rank,
   int                                           world_size) :
-    BaseType(calculate_num_reader_threads(concurrency),
-             filenames,
-             cyclic,
-             skipPredicate,
-             rank,
-             world_size),
+    m_stream(training_data::open_sfen_input_file_parallel(
+      calculate_num_reader_threads(concurrency), filenames, cyclic, skipPredicate, rank, world_size)),
+    m_feature_set(std::move(feature_set)),
+    m_batch_size(batch_size),
+    m_concurrency(concurrency),
+    m_num_workers(calculate_num_worker_threads(concurrency)) {
+
+    m_stop_flag.store(false);
+
+    auto worker = [this]() {
+        try {
+            std::vector<TrainingDataEntry> entries;
+            entries.reserve(m_batch_size);
+
+            while (!m_stop_flag.load())
+            {
+                entries.clear();
+                {
+                    m_stream->fill_threadsafe(entries, m_batch_size);
+                    if (entries.empty())
+                        break;
+                }
+
+                auto batch = new SparseBatch(*m_feature_set, entries);
+
+                {
+                    std::unique_lock lock(m_batch_mutex);
+                    m_batches_not_full.wait(lock, [this]() {
+                        return m_batches.size() < static_cast<size_t>(m_concurrency) + 1 || m_stop_flag.load();
+                    });
+                    m_batches.emplace_back(batch);
+                    lock.unlock();
+                    m_batches_any.notify_one();
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "FeaturedBatchStream worker exception: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "FeaturedBatchStream worker unknown exception" << std::endl;
+        }
+        m_stop_flag.store(true);
+        if (m_stream) {
+            m_stream->stop();
+        }
+        m_num_workers.fetch_sub(1);
+        m_batches_any.notify_one();
+    };
+
+    const int num_worker_threads = calculate_num_worker_threads(concurrency);
+    for (int i = 0; i < num_worker_threads; ++i)
+    {
+        m_workers.emplace_back(worker);
+    }
+}
+
+FeaturedBatchStream::~FeaturedBatchStream() {
+    m_stop_flag.store(true);
+    if (m_stream)
+    {
+        m_stream->stop();
+    }
+    m_batches_not_full.notify_all();
+    for (auto& worker : m_workers)
+    {
+        if (worker.joinable())
+            worker.join();
+    }
+    for (auto& batch : m_batches)
+        delete batch;
+}
+
+SparseBatch* FeaturedBatchStream::next() {
+    std::unique_lock lock(m_batch_mutex);
+    m_batches_any.wait(lock, [this]() { return !m_batches.empty() || m_num_workers.load() == 0; });
+    if (!m_batches.empty())
+    {
+        auto batch = m_batches.front();
+        m_batches.pop_front();
+        lock.unlock();
+        m_batches_not_full.notify_one();
+        return batch;
+    }
+    return nullptr;
+}
+
+#ifdef WITH_CDB
+#include "cdb_input_stream.h"
+
+int CDBFeaturedBatchStream::calculate_num_reader_threads(int concurrency) {
+    if (worker_thread_ratio >= 1)
+        return 1;
+    return std::max(1, concurrency - calculate_num_worker_threads(concurrency));
+}
+
+int CDBFeaturedBatchStream::calculate_num_worker_threads(int concurrency) {
+    if (worker_thread_ratio <= 0)
+        return 1;
+    return std::max(1, static_cast<int>(std::floor(concurrency * worker_thread_ratio)));
+}
+
+CDBFeaturedBatchStream::CDBFeaturedBatchStream(
+  std::shared_ptr<IFeatureExtractor> feature_set,
+  const std::string&               db_path,
+  int                              concurrency,
+  int                              batch_size,
+  bool                             cyclic,
+  int                              rank,
+  int                              world_size,
+  std::function<bool(const binpack::TrainingDataEntry&)> skipPredicate) :
+    m_stream(std::make_unique<cdb::CDBInputStream>(
+      db_path,
+      calculate_num_reader_threads(concurrency),
+      cyclic,
+      rank,
+      world_size,
+      std::move(skipPredicate))),
     m_feature_set(std::move(feature_set)),
     m_batch_size(batch_size),
     m_concurrency(concurrency),
@@ -585,7 +695,7 @@ FeaturedBatchStream::FeaturedBatchStream(
         {
             entries.clear();
             {
-                BaseType::m_stream->fill_threadsafe(entries, m_batch_size);
+                m_stream->fill_threadsafe(entries, m_batch_size);
                 if (entries.empty())
                     break;
             }
@@ -613,8 +723,12 @@ FeaturedBatchStream::FeaturedBatchStream(
     }
 }
 
-FeaturedBatchStream::~FeaturedBatchStream() {
+CDBFeaturedBatchStream::~CDBFeaturedBatchStream() {
     m_stop_flag.store(true);
+    if (m_stream)
+    {
+        m_stream->stop();
+    }
     m_batches_not_full.notify_all();
     for (auto& worker : m_workers)
     {
@@ -625,7 +739,7 @@ FeaturedBatchStream::~FeaturedBatchStream() {
         delete batch;
 }
 
-SparseBatch* FeaturedBatchStream::next() {
+SparseBatch* CDBFeaturedBatchStream::next() {
     std::unique_lock lock(m_batch_mutex);
     m_batches_any.wait(lock, [this]() { return !m_batches.empty() || m_num_workers.load() == 0; });
     if (!m_batches.empty())
@@ -638,6 +752,7 @@ SparseBatch* FeaturedBatchStream::next() {
     }
     return nullptr;
 }
+#endif
 
 Fen::Fen() :
     m_fen(nullptr) { }
@@ -700,29 +815,39 @@ FenBatchStream::FenBatchStream(int                                           con
     m_stop_flag.store(false);
 
     auto worker = [this]() {
-        std::vector<TrainingDataEntry> entries;
-        entries.reserve(m_batch_size);
+        try {
+            std::vector<TrainingDataEntry> entries;
+            entries.reserve(m_batch_size);
 
-        while (!m_stop_flag.load())
-        {
-            entries.clear();
+            while (!m_stop_flag.load())
             {
-                BaseType::m_stream->fill_threadsafe(entries, m_batch_size);
-                if (entries.empty())
-                    break;
-            }
+                entries.clear();
+                {
+                    m_stream->fill_threadsafe(entries, m_batch_size);
+                    if (entries.empty())
+                        break;
+                }
 
-            auto batch = new FenBatch(entries);
+                auto batch = new FenBatch(entries);
 
-            {
-                std::unique_lock lock(m_batch_mutex);
-                m_batches_not_full.wait(lock, [this]() {
-                    return m_batches.size() < static_cast<size_t>(m_concurrency) + 1 || m_stop_flag.load();
-                });
-                m_batches.emplace_back(batch);
-                lock.unlock();
-                m_batches_any.notify_one();
+                {
+                    std::unique_lock lock(m_batch_mutex);
+                    m_batches_not_full.wait(lock, [this]() {
+                        return m_batches.size() < static_cast<size_t>(m_concurrency) + 1 || m_stop_flag.load();
+                    });
+                    m_batches.emplace_back(batch);
+                    lock.unlock();
+                    m_batches_any.notify_one();
+                }
             }
+        } catch (const std::exception& e) {
+            std::cerr << "FenBatchStream worker exception: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "FenBatchStream worker unknown exception" << std::endl;
+        }
+        m_stop_flag.store(true);
+        if (m_stream) {
+            m_stream->stop();
         }
         m_num_workers.fetch_sub(1);
         m_batches_any.notify_one();

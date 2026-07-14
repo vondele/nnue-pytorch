@@ -44,5 +44,19 @@ NNUE_API SparseBatchStream* NNUE_CDECL create_sparse_batch_stream(const char*   
                                               DataloaderSkipConfig config,
                                               DataloaderDDPConfig  ddp_config);
 
+NNUE_API SparseBatchStream* NNUE_CDECL create_cdb_sparse_batch_stream(const char*          feature_set_c,
+                                                  const char*          db_path,
+                                                  int                  concurrency,
+                                                  int                  batch_size,
+                                                  bool                 cyclic,
+                                                  DataloaderSkipConfig config,
+                                                  DataloaderDDPConfig  ddp_config);
+
 NNUE_API void         NNUE_CDECL destroy_sparse_batch_stream(SparseBatchStream* stream);
 NNUE_API SparseBatch* NNUE_CDECL fetch_next_sparse_batch(SparseBatchStream* stream);
+
+// Explicit global shutdown.  Destroys all streams that have not already been
+// destroyed.  This is safe to call from a Python atexit handler before the
+// interpreter starts tearing down modules; each stream is deleted at most once
+// even if Python wrappers also call destroy from __del__.
+NNUE_API void NNUE_CDECL nnue_data_loader_shutdown();

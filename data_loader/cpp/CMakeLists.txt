@@ -90,11 +90,68 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# ---- Optional cdbdirect-like cdb support ----
+option(WITH_CDB "Build cdb-backed data loader that reads from a local chessdb dump" OFF)
+
+if(WITH_CDB)
+  set(TERARKDB_ROOT "" CACHE PATH
+      "Path to compiled terarkdb tree (required when WITH_CDB=ON)")
+  if(NOT TERARKDB_ROOT)
+    message(FATAL_ERROR "WITH_CDB=ON requires -DTERARKDB_ROOT=<path to compiled terarkdb>")
+  endif()
+
+  message(STATUS "CDB support enabled. TERARKDB_ROOT=${TERARKDB_ROOT}")
+
+  set(CDB_INCLUDE_DIRS
+    ${TERARKDB_ROOT}/output/include
+    ${TERARKDB_ROOT}/third-party/terark-zip/src
+    ${TERARKDB_ROOT}/include
+  )
+
+  set(CDB_LINK_DIRS
+    ${TERARKDB_ROOT}/output/lib
+  )
+
+  # Link order matters for static archives.
+  set(CDB_LIBRARIES
+    terarkdb
+    terark-zip-r
+    boost_fiber
+    boost_context
+    snappy
+    lz4
+    z
+    bz2
+    tbb
+    gomp
+    atomic
+    pthread
+    dl
+    rt
+  )
+endif()
+
 # ---- Targets ----
 
-add_library(training_data_loader SHARED training_data_loader.cpp training_data_loader_abi.cpp)
+set(TRAINING_DATA_LOADER_SOURCES training_data_loader.cpp training_data_loader_abi.cpp)
+
+if(WITH_CDB)
+  list(APPEND TRAINING_DATA_LOADER_SOURCES
+    lib/cdb_fen.cpp
+    cdb_reader.cpp
+    cdb_input_stream.cpp)
+endif()
+
+add_library(training_data_loader SHARED ${TRAINING_DATA_LOADER_SOURCES})
 target_compile_options(training_data_loader PRIVATE)
 target_link_libraries(training_data_loader PRIVATE Threads::Threads)
+
+if(WITH_CDB)
+  target_compile_definitions(training_data_loader PRIVATE WITH_CDB)
+  target_include_directories(training_data_loader PRIVATE ${CDB_INCLUDE_DIRS})
+  target_link_directories(training_data_loader PRIVATE ${CDB_LINK_DIRS})
+  target_link_libraries(training_data_loader PRIVATE ${CDB_LIBRARIES})
+endif()
 
 set_target_properties(training_data_loader PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"

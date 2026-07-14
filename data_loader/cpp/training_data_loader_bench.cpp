@@ -316,31 +316,46 @@ long long get_rchar_self() {
     return -1;
 }
 
-void run_bench(int concurrency, size_t iteration_count, int do_cache_files, int file_count, const char** files, CliConfig cli_config) {
+void run_bench(int concurrency, size_t iteration_count, int do_cache_files, int file_count, const char** files,
+               const std::string& cdb_path, CliConfig cli_config) {
     auto skip_config = cli_config.skip_config;
     auto ddp_config = cli_config.ddp_config;
     int batch_size = cli_config.batch_size;
     bool cyclic = cli_config.cyclic;
 
-    std::vector<std::string> ram_files;
-    std::vector<const char*> c_str_paths;
+    constexpr const char* feature_set = "Full_Threats+PP_3Wide+HalfKAv2_hm";
+
+    std::unique_ptr<SparseBatchStream, SparseBatchStreamDeleter> stream;
 
     std::cout << "Threads: " << concurrency << " | Iterations: " << iteration_count << "\n";
 
-    if (do_cache_files == 1) {
-        std::cout << "Caching files to ram: ..." << std::endl;
-        ram_files = stage_files_to_ram(file_count, files);
-        for (const auto& path : ram_files) {
-            c_str_paths.push_back(path.c_str());
+    if (!cdb_path.empty()) {
+        std::cout << "Source: cdb " << cdb_path << "\n";
+        stream.reset(create_cdb_sparse_batch_stream(feature_set, cdb_path.c_str(), concurrency,
+                                                    batch_size, cyclic, skip_config, ddp_config));
+        if (!stream) {
+            std::cerr << "FATAL: CDB support is not compiled into this binary. "
+                      << "Rebuild with -DWITH_CDB=ON.\n";
+            std::exit(1);
         }
-        file_count = static_cast<int>(c_str_paths.size());
-        files = c_str_paths.data();
-        std::cout << "Caching files to ram: done" << std::endl;
-    }
+    } else {
+        std::vector<std::string> ram_files;
+        std::vector<const char*> c_str_paths;
 
-    std::unique_ptr<SparseBatchStream, SparseBatchStreamDeleter> stream(
-        create_sparse_batch_stream("Full_Threats+PP_3Wide+HalfKAv2_hm", concurrency, file_count, files,
-            batch_size, cyclic, skip_config, ddp_config));
+        if (do_cache_files == 1) {
+            std::cout << "Caching files to ram: ..." << std::endl;
+            ram_files = stage_files_to_ram(file_count, files);
+            for (const auto& path : ram_files) {
+                c_str_paths.push_back(path.c_str());
+            }
+            file_count = static_cast<int>(c_str_paths.size());
+            files = c_str_paths.data();
+            std::cout << "Caching files to ram: done" << std::endl;
+        }
+
+        stream.reset(create_sparse_batch_stream(feature_set, concurrency, file_count, files,
+                                                batch_size, cyclic, skip_config, ddp_config));
+    }
 
     size_t warmup_iterations = 5;
     for (size_t i = 1; i <= warmup_iterations; ++i) {
@@ -388,6 +403,7 @@ int main(int argc, char** argv) {
     size_t max_plies = 100;
     int do_cache_files = 1;
     std::string cli_settings_path = "";
+    std::string cdb_path = "";
 
     int i = 1;
     for (; i < argc; ++i) {
@@ -403,6 +419,8 @@ int main(int argc, char** argv) {
             max_plies = std::stoul(argv[++i]);
         } else if (arg == "-s" && i + 1 < argc) {
             cli_settings_path = argv[++i];
+        } else if (arg == "--cdb-path" && i + 1 < argc) {
+            cdb_path = argv[++i];
         } else if (arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
             return 1;
@@ -411,8 +429,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (i >= argc) {
-        std::cerr << "Usage: " << argv[0] << " [-i iterations] [-p concurrency] [-c do_cache_files] [-m max_plies] [-s config.ini] file1 [file2 ...]\n";
+    if (cdb_path.empty() && i >= argc) {
+        std::cerr << "Usage: " << argv[0]
+                  << " [-i iterations] [-p concurrency] [-c do_cache_files] [-m max_plies] [-s config.ini] [--cdb-path path] file1 [file2 ...]\n";
+        return 1;
+    }
+
+    if (!cdb_path.empty() && i < argc) {
+        std::cerr << "FATAL: Cannot mix --cdb-path with binpack files.\n";
         return 1;
     }
 
@@ -458,10 +482,11 @@ int main(int argc, char** argv) {
 
 #ifdef NNUE_LOADER_STATISTICS
     (void)do_cache_files;
+    (void)cdb_path;
     run_report(concurrency, iteration_count, max_plies, file_count, files, active_config);
 #else
     (void)max_plies;
-    run_bench(concurrency, iteration_count, do_cache_files, file_count, files, active_config);
+    run_bench(concurrency, iteration_count, do_cache_files, file_count, files, cdb_path, active_config);
 #endif
 
     return 0;

@@ -84,8 +84,12 @@ protected:
     std::unique_ptr<training_data::BasicSfenInputStream> m_stream;
 };
 
-struct FeaturedBatchStream final : Stream<SparseBatch> {
-    using BaseType = Stream<SparseBatch>;
+struct SparseBatchStream {
+    virtual ~SparseBatchStream() = default;
+    virtual SparseBatch* next() = 0;
+};
+
+struct FeaturedBatchStream final : SparseBatchStream {
     static constexpr double worker_thread_ratio = 0.14;
 
     FeaturedBatchStream(std::shared_ptr<IFeatureExtractor> feature_set,
@@ -101,6 +105,7 @@ struct FeaturedBatchStream final : Stream<SparseBatch> {
     SparseBatch* next() override;
 
 private:
+    std::unique_ptr<training_data::BasicSfenInputStream> m_stream;
     std::shared_ptr<IFeatureExtractor> m_feature_set;
     int m_batch_size;
     int m_concurrency;
@@ -115,6 +120,40 @@ private:
     static int calculate_num_reader_threads(int concurrency);
     static int calculate_num_worker_threads(int concurrency);
 };
+
+#ifdef WITH_CDB
+struct CDBFeaturedBatchStream final : SparseBatchStream {
+    static constexpr double worker_thread_ratio = 0.14;
+
+    CDBFeaturedBatchStream(std::shared_ptr<IFeatureExtractor> feature_set,
+                           const std::string& db_path,
+                           int concurrency,
+                           int batch_size,
+                           bool cyclic,
+                           int rank = 0,
+                           int world_size = 1,
+                           std::function<bool(const binpack::TrainingDataEntry&)> skipPredicate = nullptr);
+    ~CDBFeaturedBatchStream() final;
+
+    SparseBatch* next() override;
+
+private:
+    std::unique_ptr<training_data::BasicSfenInputStream> m_stream;
+    std::shared_ptr<IFeatureExtractor> m_feature_set;
+    int m_batch_size;
+    int m_concurrency;
+    std::deque<SparseBatch*> m_batches;
+    std::mutex m_batch_mutex;
+    std::condition_variable m_batches_not_full;
+    std::condition_variable m_batches_any;
+    std::atomic_bool m_stop_flag;
+    std::atomic_int m_num_workers;
+    std::vector<std::thread> m_workers;
+
+    static int calculate_num_reader_threads(int concurrency);
+    static int calculate_num_worker_threads(int concurrency);
+};
+#endif
 
 struct Fen final {
     Fen();

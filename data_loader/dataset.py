@@ -102,7 +102,11 @@ class FenBatchProvider:
             raise StopIteration
 
     def __del__(self):
-        stream.destroy_fen_batch_stream(self.stream)
+        try:
+            if getattr(self, "stream", None) is not None:
+                stream.destroy_fen_batch_stream(self.stream)
+        except Exception:
+            pass
 
 
 class TrainingDataProvider:
@@ -171,7 +175,11 @@ class TrainingDataProvider:
             raise StopIteration
 
     def __del__(self):
-        self.destroy_stream(self.stream)
+        try:
+            if getattr(self, "stream", None) is not None:
+                self.destroy_stream(self.stream)
+        except Exception:
+            pass
 
 
 class SparseBatchProvider(TrainingDataProvider):
@@ -233,6 +241,97 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         return SparseBatchProvider(
             self.feature_set,
             self.filenames,
+            self.batch_size,
+            cyclic=self.cyclic,
+            num_workers=self.num_workers,
+            config=self.config,
+            ddp_config=self.ddp_config,
+            use_pinned_memory=self.use_pinned_memory,
+            device=self.device,
+        )
+
+
+class CDBSparseBatchProvider:
+    def __init__(
+        self,
+        feature_set: str,
+        db_path: str,
+        batch_size,
+        cyclic=True,
+        num_workers=1,
+        config: DataloaderSkipConfig = DataloaderSkipConfig(),
+        ddp_config: DataloaderDDPConfig = None,
+        use_pinned_memory=False,
+        device="cpu",
+    ):
+        self.feature_set = feature_set
+        self.db_path = db_path
+        self.batch_size = batch_size
+        self.cyclic = cyclic
+        self.num_workers = num_workers
+        self.config = config
+        self.ddp_config = ddp_config
+        self.use_pinned_memory = use_pinned_memory
+        self.device = device
+
+        self.stream = stream.create_cdb_sparse_batch_stream(
+            self.feature_set,
+            self.db_path,
+            self.num_workers,
+            self.batch_size,
+            self.cyclic,
+            self.config,
+            self.ddp_config,
+        )
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        v = stream.fetch_next_sparse_batch(self.stream)
+
+        if v:
+            tensors = v.contents.get_tensors(self.device, use_pinned_memory=self.use_pinned_memory)
+            stream.destroy_sparse_batch(v)
+            return tensors
+        else:
+            raise StopIteration
+
+    def __del__(self):
+        try:
+            if getattr(self, "stream", None) is not None:
+                stream.destroy_sparse_batch_stream(self.stream)
+        except Exception:
+            pass
+
+
+class CDBSparseBatchDataset(torch.utils.data.IterableDataset):
+    def __init__(
+        self,
+        feature_set: str,
+        db_path: str,
+        batch_size,
+        cyclic=True,
+        num_workers=1,
+        config: DataloaderSkipConfig = DataloaderSkipConfig(),
+        ddp_config: DataloaderDDPConfig = None,
+        use_pinned_memory=False,
+    ):
+        super().__init__()
+        self.feature_set = feature_set
+        self.db_path = db_path
+        self.batch_size = batch_size
+        self.cyclic = cyclic
+        self.num_workers = num_workers
+        self.config = config
+        self.ddp_config = ddp_config
+        self.use_pinned_memory = use_pinned_memory
+        self.device = "cpu"
+
+    def __iter__(self):
+        return CDBSparseBatchProvider(
+            self.feature_set,
+            self.db_path,
             self.batch_size,
             cyclic=self.cyclic,
             num_workers=self.num_workers,

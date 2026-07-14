@@ -1,10 +1,12 @@
 __pycache__/
 .container_home/
 env/
+.venv/
 build/
 build-pgo-generate/
 logs/
 testing
+test-run/
 libtraining_data_loader.*
 easy_train_data
 *.yaml

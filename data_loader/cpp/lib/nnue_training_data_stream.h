@@ -50,6 +50,7 @@ namespace training_data {
         }
 
         virtual bool eof() const = 0;
+        virtual void stop() {}
         virtual ~BasicSfenInputStream() {}
 
     private:

@@ -1,3 +1,4 @@
+import atexit
 import ctypes
 import glob
 import os
@@ -21,7 +22,7 @@ def _pin_and_move(t: torch.Tensor, device, use_pinned_memory=False, dtype=None) 
         if device == "cpu" or (isinstance(device, torch.device) and device.type == "cpu"):
             return out
         return out.to(device=device, non_blocking=True)
-    
+
     # If not using pinned memory, just copy to standard CPU storage
     out = torch.empty(t.shape, dtype=dtype, layout=t.layout, device="cpu")
     out.copy_(t)
@@ -130,6 +131,13 @@ class CDataLoaderAPI:
             try:
                 return ctypes.cdll.LoadLibrary(lib)
             except OSError as e:
+                if "cannot allocate memory in static TLS block" in str(e):
+                    raise RuntimeError(
+                        "Failed to load the data loader shared library because of a "
+                        "static TLS block allocation error. Try increasing the glibc "
+                        "optional static TLS size:\n"
+                        "  GLIBC_TUNABLES=glibc.rtld.optional_static_tls=0x2000 python train.py ..."
+                    ) from e
                 last_error = e
 
         if last_error is not None:
@@ -186,8 +194,32 @@ class CDataLoaderAPI:
             CDataloaderDDPConfig,
         ]
 
+        # EXPORT SparseBatchStream* CDECL create_cdb_sparse_batch_stream(
+        #     const char* feature_set_c,
+        #     const char* db_path,
+        #     int concurrency,
+        #     int batch_size,
+        #     bool cyclic,
+        #     DataloaderSkipConfig config,
+        #     DataloaderDDPConfig ddp_config
+        # )
+        self.dll.create_cdb_sparse_batch_stream.restype = ctypes.c_void_p
+        self.dll.create_cdb_sparse_batch_stream.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_bool,
+            CDataloaderSkipConfig,
+            CDataloaderDDPConfig,
+        ]
+
         # EXPORT void CDECL destroy_sparse_batch_stream(Stream<SparseBatch>* stream)
         self.dll.destroy_sparse_batch_stream.argtypes = [ctypes.c_void_p]
+
+        # EXPORT void CDECL nnue_data_loader_shutdown()
+        self.dll.nnue_data_loader_shutdown.argtypes = []
+        self.dll.nnue_data_loader_shutdown.restype = None
 
         # EXPORT SparseBatch* CDECL fetch_next_sparse_batch(Stream<SparseBatch>* stream)
         self.dll.fetch_next_sparse_batch.restype = ctypes.POINTER(SparseBatch)
@@ -212,10 +244,26 @@ class CDataLoaderAPI:
         ]
 
 
-type SparseBatchPtr = ctypes._Pointer[SparseBatch]
-type FenBatchPtr = ctypes._Pointer[FenBatch]
-
+# Load the native library as early as possible.  When CDB support is enabled the
+# linked terarkdb libraries require a large static TLS block; loading before
+# heavy frameworks such as PyTorch helps avoid "cannot allocate memory in static
+# TLS block" failures.
 try:
     c_lib = CDataLoaderAPI()
 except FileNotFoundError as e:
     raise ImportError(f"Failed to initialize CDataLoaderAPI: {e}.")
+
+
+# Register an explicit shutdown hook so that any C++ streams that outlive the
+# Python objects holding them are destroyed while the interpreter is still fully
+# alive.  This reduces the chance that C++ worker threads are still running when
+# static destructors (e.g. in PyTorch) are executed during process teardown.
+def _nnue_data_loader_atexit():
+    if c_lib is not None:
+        c_lib.dll.nnue_data_loader_shutdown()
+
+
+atexit.register(_nnue_data_loader_atexit)
+
+type SparseBatchPtr = ctypes._Pointer[SparseBatch]
+type FenBatchPtr = ctypes._Pointer[FenBatch]

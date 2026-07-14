@@ -1,6 +1,8 @@
 from ._native import FenBatchPtr, SparseBatchPtr
 from .config import DataloaderSkipConfig
 from .dataset import (
+    CDBSparseBatchDataset,
+    CDBSparseBatchProvider,
     FenBatchProvider,
     FixedNumBatchesDataset,
     SparseBatchDataset,
@@ -9,14 +11,16 @@ from .dataset import (
 from .stream import destroy_sparse_batch, get_sparse_batch_from_fens
 
 __all__ = [
+    "CDBSparseBatchDataset",
+    "CDBSparseBatchProvider",
     "DataloaderSkipConfig",
     "FenBatchProvider",
     "FenBatchPtr",
     "FixedNumBatchesDataset",
     "SparseBatchDataset",
     "SparseBatchProvider",
-    # types
-    "SparseBatchPtr",
     "destroy_sparse_batch",
     "get_sparse_batch_from_fens",
+    # types
+    "SparseBatchPtr",
 ]

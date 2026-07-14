@@ -16,13 +16,34 @@ ROOT_DIR=$(pwd)
 SRC_DIR=${SRC_DIR:-data_loader/cpp/}
 BUILD_DIR=${BUILD_DIR:-build}
 PGO_DIR=${PGO_DIR:-pgo_data}
-PGO_INPUT=${1:-$ROOT_DIR/.pgo/small.binpack}
+# Parse arguments. The first non-flag argument is the PGO input binpack.
+# Any arguments after a '--' separator are forwarded to CMake.
+CMAKE_EXTRA_ARGS=()
+PGO_INPUT=""
+
+while [ $# -gt 0 ]; do
+  arg="$1"
+  if [ "$arg" = "--" ]; then
+    shift
+    CMAKE_EXTRA_ARGS=("$@")
+    break
+  fi
+  if [ -z "$PGO_INPUT" ] && [ "${arg#-}" = "$arg" ]; then
+    PGO_INPUT="$arg"
+  else
+    CMAKE_EXTRA_ARGS+=("$arg")
+  fi
+  shift
+done
+
+PGO_INPUT=${PGO_INPUT:-$ROOT_DIR/.pgo/small.binpack}
 
 echo "ROOT_DIR: $ROOT_DIR"
 echo "SRC_DIR: $SRC_DIR"
 echo "BUILD_DIR: $BUILD_DIR"
 echo "PGO_DIR: $PGO_DIR"
 echo "PGO_INPUT: $PGO_INPUT"
+echo "CMAKE_EXTRA_ARGS: ${CMAKE_EXTRA_ARGS[*]}"
 
 echo "Cleaning previous build and profile data..."
 rm -rf "$BUILD_DIR" "$PGO_DIR"
@@ -32,7 +53,9 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=PGO_Generate \
   -DPGO_PROFILE_DATA_DIR="$ROOT_DIR/$PGO_DIR" \
   -DPGO_INPUT="$PGO_INPUT" \
-  -DLIB_COPY_DIR="$ROOT_DIR"
+  -DLIB_COPY_DIR="$ROOT_DIR" \
+  "${CMAKE_EXTRA_ARGS[@]}"
+
 
 echo "Building instrumented default targets..."
 cmake --build "$BUILD_DIR" -j
@@ -57,7 +80,9 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=PGO_Use \
   -DPGO_PROFILE_DATA_DIR="$ROOT_DIR/$PGO_DIR" \
   -DCMAKE_INSTALL_PREFIX="./" \
-  -DLIB_COPY_DIR="$ROOT_DIR"
+  -DLIB_COPY_DIR="$ROOT_DIR" \
+  "${CMAKE_EXTRA_ARGS[@]}"
+
 
 echo "Building default targets with profile data..."
 cmake --build "$BUILD_DIR" -j
