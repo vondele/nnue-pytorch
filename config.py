@@ -16,10 +16,13 @@ from model.config import NNUELightningConfig
 @dataclass(kw_only=True)
 class TrainingConfig:
     datasets: Positional[tuple[str, ...]] = ()
-    """Training datasets (.binpack). Interleaved at chunk level if multiple specified. Same data is used for training and validation if no validation data is specified."""
+    """Training datasets (.binpack). Interleaved at chunk level if multiple specified. Same data is used for training and validation if no validation data is specified. May be combined with --cdb-path via --cdb-fraction."""
 
     cdb_path: str | None = None
-    """Path to a local cdb dump to use as a training source (standalone or mixed with binpacks)."""
+    """Path to a local cdb dump. Can be used alone or together with --datasets when --cdb-fraction is set."""
+
+    cdb_fraction: float = 0.0
+    """Fraction of training batches drawn from --cdb-path when both a CDB dump and binpack datasets are supplied. 0.0 = binpack only, 1.0 = CDB only."""
 
     validation_datasets: UseAppendAction[tuple[str, ...]] = ()
     """Validation data to use for validation instead of the training data."""
@@ -106,6 +109,14 @@ class TrainingConfig:
     def __post_init__(self):
         if not self.datasets and not self.cdb_path:
             raise ValueError("Argument `datasets` or `cdb_path` is required.")
+        if not (0.0 <= self.cdb_fraction <= 1.0):
+            raise ValueError(
+                f"--cdb-fraction must be in [0, 1], got {self.cdb_fraction}."
+            )
+        if self.cdb_fraction > 0.0 and self.cdb_path is None:
+            raise ValueError("--cdb-fraction > 0 requires --cdb-path.")
+        if self.cdb_fraction < 1.0 and not self.datasets:
+            raise ValueError("--cdb-fraction < 1 requires at least one --datasets entry.")
         if self.max_epochs <= 0 or self.epoch_size <= 0 or self.batch_size <= 0:
             raise ValueError(
                 "Arguments `max_epochs`, `epoch_size` and `batch_size` must be positive."

@@ -5,6 +5,8 @@ from .dataset import (
     CDBSparseBatchProvider,
     FenBatchProvider,
     FixedNumBatchesDataset,
+    MixedSparseBatchDataset,
+    MixedSparseBatchProvider,
     SparseBatchDataset,
     SparseBatchProvider,
 )
@@ -17,6 +19,8 @@ __all__ = [
     "FenBatchProvider",
     "FenBatchPtr",
     "FixedNumBatchesDataset",
+    "MixedSparseBatchDataset",
+    "MixedSparseBatchProvider",
     "SparseBatchDataset",
     "SparseBatchProvider",
     "destroy_sparse_batch",

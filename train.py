@@ -43,13 +43,32 @@ def make_data_loaders(
     rank=0,
     world_size=1,
     cdb_path=None,
+    cdb_fraction=0.0,
+    seed=42,
 ):
     # Epoch and validation sizes are global; shard across DDP ranks.
     features_name = feature_name
     effective_batch_size = batch_size * world_size
     train_num_batches = max(1, epoch_size // effective_batch_size)
 
-    if cdb_path is not None:
+    use_cdb = cdb_path is not None and (cdb_fraction > 0.0 or train_filenames is None)
+    use_binpack = train_filenames is not None and (cdb_fraction < 1.0 or cdb_path is None)
+
+    if use_binpack and use_cdb:
+        train_infinite = data_loader.MixedSparseBatchDataset(
+            features_name,
+            train_filenames,
+            cdb_path,
+            batch_size,
+            cdb_fraction=cdb_fraction,
+            cyclic=True,
+            num_workers=num_workers,
+            config=config,
+            ddp_config=DataloaderDDPConfig(rank=rank, world_size=world_size),
+            device=prefetch_device,
+            seed=seed,
+        )
+    elif use_cdb:
         train_infinite = data_loader.CDBSparseBatchDataset(
             features_name,
             cdb_path,
@@ -158,10 +177,19 @@ def main():
     args = tyro.cli(TrainingConfig)
     actual_threads, actual_workers = args.threads, args.num_workers
 
+    if not (0.0 <= args.cdb_fraction <= 1.0):
+        raise ValueError("--cdb-fraction must be in [0, 1], got {0}".format(args.cdb_fraction))
+
+    if args.cdb_fraction > 0.0 and args.cdb_path is None:
+        raise ValueError("--cdb-fraction > 0 requires --cdb-path")
+
+    if args.cdb_fraction < 1.0 and len(args.datasets) == 0:
+        raise ValueError("--cdb-fraction < 1 requires at least one --datasets entry")
+
     if args.cdb_path is not None and not os.path.exists(args.cdb_path):
         raise RuntimeError(f"{args.cdb_path} does not exist")
 
-    if args.cdb_path is None:
+    if len(args.datasets) > 0:
         for dataset in args.datasets:
             if not os.path.exists(dataset):
                 raise RuntimeError(f"{dataset} does not exist")
@@ -170,14 +198,24 @@ def main():
         if not os.path.exists(val_dataset):
             raise RuntimeError(f"{val_dataset} does not exist")
 
-    train_datasets = args.datasets
-    val_datasets = None
+    has_cdb = args.cdb_path is not None
+    has_binpack = len(args.datasets) > 0
 
-    if args.cdb_path is not None:
-        train_datasets = None
+    use_cdb = has_cdb and (args.cdb_fraction > 0.0 or not has_binpack)
+    use_binpack = has_binpack and (args.cdb_fraction < 1.0 or not has_cdb)
+
+    train_datasets = args.datasets if use_binpack else None
+    val_datasets = None
 
     if len(args.validation_datasets) > 0:
         val_datasets = args.validation_datasets
+
+    if use_binpack and use_cdb:
+        print(
+            f"Training with mixed sources: cdb_fraction={args.cdb_fraction}, "
+            f"cdb_path={args.cdb_path}, datasets={args.datasets}. "
+            f"Total C++ loader threads ≈ 2 * num_workers = {2 * actual_workers}."
+        )
 
     global_batch_size_requested = args.batch_size
 
@@ -340,6 +378,8 @@ def main():
         rank=rank,
         world_size=world_size,
         cdb_path=args.cdb_path,
+        cdb_fraction=args.cdb_fraction,
+        seed=args.seed,
     )
 
     optimizer_and_schedulers = nnue.configure_optimizers()

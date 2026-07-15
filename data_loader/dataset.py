@@ -1,4 +1,5 @@
 import queue
+import random
 import threading
 from dataclasses import dataclass
 
@@ -339,6 +340,102 @@ class CDBSparseBatchDataset(torch.utils.data.IterableDataset):
             ddp_config=self.ddp_config,
             use_pinned_memory=self.use_pinned_memory,
             device=self.device,
+        )
+
+
+class MixedSparseBatchProvider:
+    """Yields batches from a binpack stream and a CDB stream in a fixed ratio.
+
+    Both sub-iterators must be infinite (cyclic).  The source for each batch is
+    chosen independently using a per-rank seeded RNG so that different DDP ranks
+    do not make identical choices.
+    """
+
+    def __init__(
+        self,
+        binpack_iter,
+        cdb_iter,
+        cdb_fraction: float,
+        seed: int = 0,
+    ):
+        self.binpack_iter = binpack_iter
+        self.cdb_iter = cdb_iter
+        self.cdb_fraction = cdb_fraction
+        self.rng = random.Random(seed)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.rng.random() < self.cdb_fraction:
+            return next(self.cdb_iter)
+        return next(self.binpack_iter)
+
+
+class MixedSparseBatchDataset(torch.utils.data.IterableDataset):
+    """Iterable dataset that mixes binpack and CDB batches at batch granularity."""
+
+    def __init__(
+        self,
+        feature_set: str,
+        filenames: list[str],
+        db_path: str,
+        batch_size,
+        cdb_fraction: float,
+        cyclic=True,
+        num_workers=1,
+        config: DataloaderSkipConfig = DataloaderSkipConfig(),
+        ddp_config: DataloaderDDPConfig = None,
+        use_pinned_memory=False,
+        device="cpu",
+        seed: int = 0,
+    ):
+        super().__init__()
+        self.feature_set = feature_set
+        self.filenames = filenames
+        self.db_path = db_path
+        self.batch_size = batch_size
+        self.cdb_fraction = cdb_fraction
+        self.cyclic = cyclic
+        self.num_workers = num_workers
+        self.config = config
+        self.ddp_config = ddp_config
+        self.use_pinned_memory = use_pinned_memory
+        self.device = device
+        self.seed = seed
+
+    def __iter__(self):
+        rank = 0
+        if self.ddp_config is not None:
+            rank = self.ddp_config.rank
+
+        binpack_iter = SparseBatchProvider(
+            self.feature_set,
+            self.filenames,
+            self.batch_size,
+            cyclic=self.cyclic,
+            num_workers=self.num_workers,
+            config=self.config,
+            ddp_config=self.ddp_config,
+            use_pinned_memory=self.use_pinned_memory,
+            device=self.device,
+        )
+        cdb_iter = CDBSparseBatchProvider(
+            self.feature_set,
+            self.db_path,
+            self.batch_size,
+            cyclic=self.cyclic,
+            num_workers=self.num_workers,
+            config=self.config,
+            ddp_config=self.ddp_config,
+            use_pinned_memory=self.use_pinned_memory,
+            device=self.device,
+        )
+        return MixedSparseBatchProvider(
+            iter(binpack_iter),
+            iter(cdb_iter),
+            self.cdb_fraction,
+            seed=self.seed + rank,
         )
 
 
