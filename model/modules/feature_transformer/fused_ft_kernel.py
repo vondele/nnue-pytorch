@@ -247,3 +247,98 @@ void fused_double_ft_backward(
             kernel, (num_threads,)
         )
     return _fused_double_ft_backward_kernel_cache[key]
+
+
+_fused_double_ft_backward_feature_centric_kernel_cache = dict()
+
+@torch.compiler.disable(recursive=False)
+def make_fused_double_ft_backward_feature_centric_kernel(l1_size: int, num_psqt_buckets: int = 8):
+    l1_half = l1_size // 2
+    num_threads = _get_num_threads_for_backward(l1_half)
+    output_thread_slice_size = l1_half // num_threads
+
+    key = (l1_size, num_psqt_buckets, num_threads)
+    if key not in _fused_double_ft_backward_feature_centric_kernel_cache:
+        kernel = cp.RawKernel(
+            r"""
+typedef unsigned int uint32_t;
+typedef int int32_t;
+typedef signed char int8_t;
+typedef long long int64_t;
+
+extern "C" __global__
+void fused_double_ft_backward_feature_centric(
+    const float* __restrict__ g_w0,
+    const float* __restrict__ g_w1,
+    const float* __restrict__ g_b0,
+    const float* __restrict__ g_b1,
+    const float* __restrict__ grad_wpsqt,
+    const float* __restrict__ grad_bpsqt,
+    const int64_t* __restrict__ psqt_indices,
+    const int32_t* __restrict__ sorted_pos,
+    const int8_t*  __restrict__ sorted_persp,
+    const int32_t* __restrict__ boundaries,
+    const int32_t* __restrict__ unique_idx,
+          float* __restrict__ grad_weight,
+    const int32_t        l1_size,
+    const int32_t        output_size,
+    const int32_t        num_psqt_buckets
+) {
+    const uint32_t u = blockIdx.x;
+    const uint32_t slice_offset = threadIdx.x * """ + str(output_thread_slice_size) + r""";
+
+    const int32_t l1_half = """ + str(l1_half) + r""";
+    const int32_t idx = unique_idx[u];
+    const int32_t start = boundaries[u];
+    const int32_t end = boundaries[u + 1];
+
+    #pragma unroll
+    for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
+        uint32_t i = slice_offset + s;
+        float sum0 = 0.0f;
+        float sum1 = 0.0f;
+        for (int32_t p = start; p < end; ++p) {
+            const int32_t pos = sorted_pos[p];
+            if (sorted_persp[p] == 0) {
+                sum0 += __ldg(&g_w0[pos * l1_half + i]);
+                sum1 += __ldg(&g_w1[pos * l1_half + i]);
+            } else {
+                sum0 += __ldg(&g_b0[pos * l1_half + i]);
+                sum1 += __ldg(&g_b1[pos * l1_half + i]);
+            }
+        }
+        grad_weight[idx * output_size + i] = sum0;
+        grad_weight[idx * output_size + i + l1_half] = sum1;
+    }
+
+    if (threadIdx.x == 0) {
+        float psqt_sums[8];
+        #pragma unroll
+        for (int32_t b = 0; b < num_psqt_buckets; ++b) {
+            psqt_sums[b] = 0.0f;
+        }
+        for (int32_t p = start; p < end; ++p) {
+            const int32_t pos = sorted_pos[p];
+            const int64_t p_idx = __ldg(&psqt_indices[pos]);
+            if (sorted_persp[p] == 0) {
+                psqt_sums[p_idx] += __ldg(&grad_wpsqt[pos]);
+            } else {
+                psqt_sums[p_idx] += __ldg(&grad_bpsqt[pos]);
+            }
+        }
+        #pragma unroll
+        for (int32_t b = 0; b < num_psqt_buckets; ++b) {
+            if (psqt_sums[b] != 0.0f) {
+                grad_weight[idx * output_size + l1_size + b] = psqt_sums[b];
+            }
+        }
+    }
+}
+""",
+            "fused_double_ft_backward_feature_centric",
+        )
+        kernel.compile()
+        _fused_double_ft_backward_feature_centric_kernel_cache[key] = _kernel_with_threads(
+            kernel, (num_threads,)
+        )
+    return _fused_double_ft_backward_feature_centric_kernel_cache[key]
