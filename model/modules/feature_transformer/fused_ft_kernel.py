@@ -166,71 +166,77 @@ void fused_double_ft_backward(
     const int64_t p_idx = __ldg(&psqt_indices[block_idx]);
     const float gw_psqt = __ldg(&grad_wpsqt[block_idx]);
     const float gb_psqt = __ldg(&grad_bpsqt[block_idx]);
+    const uint32_t clamp_base = block_idx * 4 * l1_half;
 
     if (threadIdx.x == 0) {
         atomicAdd(&grad_bias[l1_size + p_idx], gw_psqt + gb_psqt);
     }
 
+    float g_w0[ """ + str(output_thread_slice_size) + r""" ];
+    float g_w1[ """ + str(output_thread_slice_size) + r""" ];
+    float g_b0[ """ + str(output_thread_slice_size) + r""" ];
+    float g_b1[ """ + str(output_thread_slice_size) + r""" ];
+    float bias_acc0[ """ + str(output_thread_slice_size) + r""" ];
+    float bias_acc1[ """ + str(output_thread_slice_size) + r""" ];
+
     #pragma unroll
     for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
         uint32_t i = slice_offset + s;
-        const uint32_t clamp_base = block_idx * 4 * l1_half;
         float clamped_w0 = __ldg(&clamped_out[clamp_base + 0 * l1_half + i]);
         float clamped_w1 = __ldg(&clamped_out[clamp_base + 1 * l1_half + i]);
         float clamped_b0 = __ldg(&clamped_out[clamp_base + 2 * l1_half + i]);
         float clamped_b1 = __ldg(&clamped_out[clamp_base + 3 * l1_half + i]);
 
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int w_idx = w_idx_row[k];
-            if (w_idx != -1) {
-                if (threadIdx.x == 0) {
-                    atomicAdd(&grad_weight[w_idx * output_size + l1_size + p_idx], gw_psqt);
-                }
-            } else break;
+        float gl0_i    = __ldg(&grad_l0[block_idx * l1_size + i]);
+        float gl0_i_h  = __ldg(&grad_l0[block_idx * l1_size + l1_half + i]);
+
+        float dw0 = (clamped_w0 == 0.0f || clamped_w0 == max_ft_act) ? 0.0f : gl0_i   * clamped_w1;
+        float dw1 = (clamped_w1 == 0.0f || clamped_w1 == max_ft_act) ? 0.0f : gl0_i   * clamped_w0;
+        float db0 = (clamped_b0 == 0.0f || clamped_b0 == max_ft_act) ? 0.0f : gl0_i_h * clamped_b1;
+        float db1 = (clamped_b1 == 0.0f || clamped_b1 == max_ft_act) ? 0.0f : gl0_i_h * clamped_b0;
+
+        g_w0[s] = us_val * dw0 + them_val * db0;
+        g_w1[s] = us_val * dw1 + them_val * db1;
+        g_b0[s] = them_val * dw0 + us_val * db0;
+        g_b1[s] = them_val * dw1 + us_val * db1;
+
+        bias_acc0[s] = g_w0[s] + g_b0[s];
+        bias_acc1[s] = g_w1[s] + g_b1[s];
+    }
+
+    for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
+        int w_idx = w_idx_row[k];
+        if (w_idx == -1) break;
+        if (threadIdx.x == 0) {
+            atomicAdd(&grad_weight[w_idx * output_size + l1_size + p_idx], gw_psqt);
         }
-
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int b_idx = b_idx_row[k];
-            if (b_idx != -1) {
-                if (threadIdx.x == 0) {
-                    atomicAdd(&grad_weight[b_idx * output_size + l1_size + p_idx], gb_psqt);
-                }
-            } else break;
+        #pragma unroll
+        for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
+            uint32_t i = slice_offset + s;
+            atomicAdd(&grad_weight[w_idx * output_size + i],           g_w0[s]);
+            atomicAdd(&grad_weight[w_idx * output_size + i + l1_half], g_w1[s]);
         }
+    }
 
-        float g_l0_w0 = __ldg(&grad_l0[block_idx * l1_size + i]) * clamped_w1;
-        float g_l0_w1 = __ldg(&grad_l0[block_idx * l1_size + i]) * clamped_w0;
-        float g_l0_b0 = __ldg(&grad_l0[block_idx * l1_size + l1_half + i]) * clamped_b1;
-        float g_l0_b1 = __ldg(&grad_l0[block_idx * l1_size + l1_half + i]) * clamped_b0;
-
-        if (clamped_w0 == 0.0f || clamped_w0 == max_ft_act) g_l0_w0 = 0.0f;
-        if (clamped_w1 == 0.0f || clamped_w1 == max_ft_act) g_l0_w1 = 0.0f;
-        if (clamped_b0 == 0.0f || clamped_b0 == max_ft_act) g_l0_b0 = 0.0f;
-        if (clamped_b1 == 0.0f || clamped_b1 == max_ft_act) g_l0_b1 = 0.0f;
-
-        float g_w0 = us_val * g_l0_w0 + them_val * g_l0_b0;
-        float g_b0 = them_val * g_l0_w0 + us_val * g_l0_b0;
-        float g_w1 = us_val * g_l0_w1 + them_val * g_l0_b1;
-        float g_b1 = them_val * g_l0_w1 + us_val * g_l0_b1;
-
-        atomicAdd(&grad_bias[i], g_w0 + g_b0);
-        atomicAdd(&grad_bias[i + l1_half], g_w1 + g_b1);
-
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int w_idx = w_idx_row[k];
-            if (w_idx != -1) {
-                atomicAdd(&grad_weight[w_idx * output_size + i], g_w0);
-                atomicAdd(&grad_weight[w_idx * output_size + i + l1_half], g_w1);
-            } else break;
+    for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
+        int b_idx = b_idx_row[k];
+        if (b_idx == -1) break;
+        if (threadIdx.x == 0) {
+            atomicAdd(&grad_weight[b_idx * output_size + l1_size + p_idx], gb_psqt);
         }
-
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int b_idx = b_idx_row[k];
-            if (b_idx != -1) {
-                atomicAdd(&grad_weight[b_idx * output_size + i], g_b0);
-                atomicAdd(&grad_weight[b_idx * output_size + i + l1_half], g_b1);
-            } else break;
+        #pragma unroll
+        for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
+            uint32_t i = slice_offset + s;
+            atomicAdd(&grad_weight[b_idx * output_size + i],           g_b0[s]);
+            atomicAdd(&grad_weight[b_idx * output_size + i + l1_half], g_b1[s]);
         }
+    }
+
+    #pragma unroll
+    for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
+        uint32_t i = slice_offset + s;
+        atomicAdd(&grad_bias[i],           bias_acc0[s]);
+        atomicAdd(&grad_bias[i + l1_half], bias_acc1[s]);
     }
 }
 """,
