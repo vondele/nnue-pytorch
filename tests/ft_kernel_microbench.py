@@ -61,7 +61,9 @@ def build_inputs(batch_size, feature_name, l1, fake_quantize, padding_ratio, dev
 
     us = torch.rand(batch_size, device=device)
     them = 1.0 - us
+    # Piece count 1..31 mapped to PSQT buckets the same way NNUEModel does.
     pc = torch.randint(1, 32, (batch_size,), dtype=torch.int64, device=device)
+    pc = (pc - 1) // 4
 
     # Random active indices, then mark the last fraction as padding
     wi = torch.randint(0, num_inputs, (batch_size, max_active), dtype=torch.int32, device=device)
