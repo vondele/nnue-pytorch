@@ -2,6 +2,16 @@
 
 Replaces the CuPy RawKernel implementation. The fused backend is the fast
 CUDA path; CPU/MPS fall back to the torch sparse path.
+
+Design:
+- One Triton program per (position, column_tile).
+- For typical L1 <= 1024 the column tile covers the full L1/2 half-width, so
+  each position is handled by a single program and active indices are loaded
+  only once.
+- The backward kernel issues coalesced atomicAdd's to grad_weight per active
+  index, matching the perf-gpu-ft-atomic-coalesce CUDA strategy.
+- PSQT outputs/gradients are handled by masking the first column of tile 0,
+  avoiding a separate kernel launch.
 """
 
 import torch

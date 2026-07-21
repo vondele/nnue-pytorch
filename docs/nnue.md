@@ -15,6 +15,11 @@ What this document DOES contain:
 - pytorch trainer implementation (+ important CUDA kernels)
 - architectural considerations and history
 
+> **Note for maintainers:** The trainer's fused feature-transform kernel now uses
+> **Triton** (`model/modules/feature_transformer/triton_ft_kernel.py`), not CuPy.
+> The CuPy code examples in this document are kept for illustration but are no
+> longer the production implementation.
+
 What this document DOES NOT contain:
 
 - a tutorial for training networks (for that see [the wiki](https://github.com/glinscott/nnue-pytorch/wiki))
@@ -2354,6 +2359,10 @@ if __name__ == '__main__':
 ### Using custom CUDA kernels
 
 How to run our own kernel? Don't we need a complicated setup with the CUDA compiler and all that? CuPy to the rescue. CuPy is a python library that allows easy creation of CUDA kernels using plain python strings containing the CUDA code. CuPy handles compilation and everything else for us. For example:
+
+> **Current codebase note:** production kernels were migrated from CuPy to
+> **Triton** to remove the CuPy dependency. See
+> `model/modules/feature_transformer/triton_ft_kernel.py` and `BENCHMARKS.md`.
 
 ```python
 import cupy as cp
