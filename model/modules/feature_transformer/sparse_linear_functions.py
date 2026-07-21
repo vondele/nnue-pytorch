@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-from torch import autograd
 
 
 def _torch_sparse_linear(feature_indices, weight, bias):

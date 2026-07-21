@@ -1,16 +1,16 @@
+import importlib.util
 import torch
 from torch import autograd
 
-_HAS_TRITON_KERNELS = False
-try:
-    import triton
-    from .triton_ft_kernel import (
-        fused_double_ft_forward,
-        fused_double_ft_backward,
-    )
-    _HAS_TRITON_KERNELS = True
-except (ImportError, OSError, RuntimeError):
-    pass
+_HAS_TRITON_KERNELS = importlib.util.find_spec("triton") is not None
+if _HAS_TRITON_KERNELS:
+    try:
+        from .triton_ft_kernel import (
+            fused_double_ft_forward,
+            fused_double_ft_backward,
+        )
+    except (ImportError, OSError, RuntimeError):
+        _HAS_TRITON_KERNELS = False
 
 
 class FusedDoubleFtFunction(autograd.Function):
