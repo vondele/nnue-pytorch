@@ -100,10 +100,12 @@ def fused_double_ft_forward_triton(
     tl.store(clamped_out_ptr + clamp_base + 2 * L1_HALF + col_offsets, l0_b0, mask=col_mask)
     tl.store(clamped_out_ptr + clamp_base + 3 * L1_HALF + col_offsets, l0_b1, mask=col_mask)
 
-    # Only the first column of tile 0 writes PSQT values (no contention).
-    psqt_mask = col_offsets == 0
-    tl.store(wpsqt_out_ptr + pid_b, w_psqt, mask=psqt_mask)
-    tl.store(bpsqt_out_ptr + pid_b, b_psqt, mask=psqt_mask)
+    # Only tile 0 writes the scalar PSQT outputs, and PSQT has its own bias.
+    if pid_c == 0:
+        w_psqt += tl.load(bias_ptr + L1 + p_idx)
+        b_psqt += tl.load(bias_ptr + L1 + p_idx)
+        tl.store(wpsqt_out_ptr + pid_b, w_psqt)
+        tl.store(bpsqt_out_ptr + pid_b, b_psqt)
 
 
 @triton.jit
@@ -168,9 +170,9 @@ def fused_double_ft_backward_triton(
     tl.atomic_add(grad_bias_ptr + col_offsets, g_w0 + g_b0, mask=col_mask)
     tl.atomic_add(grad_bias_ptr + L1_HALF + col_offsets, g_w1 + g_b1, mask=col_mask)
 
-    # PSQT bias update only from tile 0.
-    psqt_mask = col_offsets == 0
-    tl.atomic_add(grad_bias_ptr + L1 + p_idx, gw_psqt + gb_psqt, mask=psqt_mask)
+    # PSQT updates are only issued from tile 0 to avoid contention/duplication.
+    if pid_c == 0:
+        tl.atomic_add(grad_bias_ptr + L1 + p_idx, gw_psqt + gb_psqt)
 
     # Scatter coalesced updates to grad_weight for each active index.
     for k in range(K):
@@ -179,14 +181,16 @@ def fused_double_ft_backward_triton(
             gw_row = grad_weight_ptr + w_idx * D
             tl.atomic_add(gw_row + col_offsets, g_w0, mask=col_mask)
             tl.atomic_add(gw_row + L1_HALF + col_offsets, g_w1, mask=col_mask)
-            tl.atomic_add(gw_row + L1 + p_idx, gw_psqt, mask=psqt_mask)
+            if pid_c == 0:
+                tl.atomic_add(gw_row + L1 + p_idx, gw_psqt)
 
         b_idx = tl.load(black_indices_ptr + pid_b * K + k)
         if b_idx != -1:
             gw_row = grad_weight_ptr + b_idx * D
             tl.atomic_add(gw_row + col_offsets, g_b0, mask=col_mask)
             tl.atomic_add(gw_row + L1_HALF + col_offsets, g_b1, mask=col_mask)
-            tl.atomic_add(gw_row + L1 + p_idx, gb_psqt, mask=psqt_mask)
+            if pid_c == 0:
+                tl.atomic_add(gw_row + L1 + p_idx, gb_psqt)
 
 
 # ---------------------------------------------------------------------------
