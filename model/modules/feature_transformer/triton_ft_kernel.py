@@ -7,16 +7,42 @@ Design:
 - One Triton program per (position, column_tile).
 - For typical L1 <= 1024 the column tile covers the full L1/2 half-width, so
   each position is handled by a single program and active indices are loaded
-  only once.
+  only once per program.
 - The backward kernel issues coalesced atomicAdd's to grad_weight per active
   index, matching the perf-gpu-ft-atomic-coalesce CUDA strategy.
-- PSQT outputs/gradients are handled by masking the first column of tile 0,
-  avoiding a separate kernel launch.
+- PSQT outputs/gradients are handled by tile 0 only, avoiding a separate
+  kernel launch.
+- The column block size defaults to the full L1/2 half-width (up to 512), but
+  can be overridden with the TRITON_FT_BLOCK_COL environment variable for
+  hardware-specific tuning.
 """
+
+import os
 
 import torch
 import triton
 import triton.language as tl
+
+
+def _default_block_col(l1_half: int) -> int:
+    """Default column-tile size.
+
+    A single tile is used whenever L1/2 <= 512, which avoids reloading the
+    active indices and keeps atomics coalesced over the full half-width.
+    Larger L1 is tiled into 512-column chunks.
+    """
+    return max(64, min(512, 1 << (l1_half - 1).bit_length()))
+
+
+def _get_block_col(l1_half: int) -> int:
+    """Return the column-tile size, allowing env-var override for tuning."""
+    env = os.environ.get("TRITON_FT_BLOCK_COL")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    return _default_block_col(l1_half)
 
 
 @triton.jit
@@ -199,16 +225,6 @@ def fused_double_ft_backward_triton(
 
 _fused_double_ft_forward_cache = dict()
 _fused_double_ft_backward_cache = dict()
-
-
-def _get_block_col(l1_half: int) -> int:
-    """Power-of-two block size covering the L1/2 columns.
-
-    A single tile is used whenever L1/2 <= 512, which avoids reloading the
-    active indices and keeps atomics coalesced over the full half-width.
-    Larger L1 is tiled into 512-column chunks.
-    """
-    return max(64, min(512, 1 << (l1_half - 1).bit_length()))
 
 
 def fused_double_ft_forward(
