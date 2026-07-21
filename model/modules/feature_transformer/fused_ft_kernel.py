@@ -50,7 +50,26 @@ void fused_double_ft_forward(
     
     const int32_t l1_size = """ + str(l1_size) + r""";
     const int32_t l1_half = """ + str(l1_half) + r""";
-    
+    const int64_t p_idx = __ldg(&psqt_indices[block_idx]);
+    float w_psqt_val = __ldg(&bias[l1_size + p_idx]);
+    float b_psqt_val = __ldg(&bias[l1_size + p_idx]);
+
+    if (threadIdx.x == 0) {
+        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
+            int w_idx = w_idx_row[k];
+            if (w_idx != -1) {
+                w_psqt_val += __ldg(&weight[w_idx * output_size + l1_size + p_idx]);
+            } else break;
+        }
+
+        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
+            int b_idx = b_idx_row[k];
+            if (b_idx != -1) {
+                b_psqt_val += __ldg(&weight[b_idx * output_size + l1_size + p_idx]);
+            } else break;
+        }
+    }
+
     #pragma unroll
     for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
         uint32_t i = slice_offset + s;
@@ -96,23 +115,7 @@ void fused_double_ft_forward(
     }
     
     if (threadIdx.x == 0) {
-        int64_t p_idx = __ldg(&psqt_indices[block_idx]);
-        float w_psqt_val = __ldg(&bias[l1_size + p_idx]);
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int w_idx = w_idx_row[k];
-            if (w_idx != -1) {
-                w_psqt_val += __ldg(&weight[w_idx * output_size + l1_size + p_idx]);
-            } else break;
-        }
         wpsqt_out[block_idx] = w_psqt_val;
-
-        float b_psqt_val = __ldg(&bias[l1_size + p_idx]);
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int b_idx = b_idx_row[k];
-            if (b_idx != -1) {
-                b_psqt_val += __ldg(&weight[b_idx * output_size + l1_size + p_idx]);
-            } else break;
-        }
         bpsqt_out[block_idx] = b_psqt_val;
     }
 }
@@ -170,7 +173,28 @@ void fused_double_ft_backward(
     
     const int32_t l1_size = """ + str(l1_size) + r""";
     const int32_t l1_half = """ + str(l1_half) + r""";
-    
+    const int64_t p_idx = __ldg(&psqt_indices[block_idx]);
+    const float gw_psqt = __ldg(&grad_wpsqt[block_idx]);
+    const float gb_psqt = __ldg(&grad_bpsqt[block_idx]);
+
+    if (threadIdx.x == 0) {
+        atomicAdd(&grad_bias[l1_size + p_idx], gw_psqt + gb_psqt);
+
+        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
+            int w_idx = w_idx_row[k];
+            if (w_idx != -1) {
+                atomicAdd(&grad_weight[w_idx * output_size + l1_size + p_idx], gw_psqt);
+            } else break;
+        }
+
+        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
+            int b_idx = b_idx_row[k];
+            if (b_idx != -1) {
+                atomicAdd(&grad_weight[b_idx * output_size + l1_size + p_idx], gb_psqt);
+            } else break;
+        }
+    }
+
     #pragma unroll
     for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
         uint32_t i = slice_offset + s;
@@ -211,28 +235,6 @@ void fused_double_ft_backward(
             if (b_idx != -1) {
                 atomicAdd(&grad_weight[b_idx * output_size + i], g_b0);
                 atomicAdd(&grad_weight[b_idx * output_size + i + l1_half], g_b1);
-            } else break;
-        }
-    }
-    
-    if (threadIdx.x == 0) {
-        int64_t p_idx = __ldg(&psqt_indices[block_idx]);
-        float gw_psqt = __ldg(&grad_wpsqt[block_idx]);
-        float gb_psqt = __ldg(&grad_bpsqt[block_idx]);
-        
-        atomicAdd(&grad_bias[l1_size + p_idx], gw_psqt + gb_psqt);
-        
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int w_idx = w_idx_row[k];
-            if (w_idx != -1) {
-                atomicAdd(&grad_weight[w_idx * output_size + l1_size + p_idx], gw_psqt);
-            } else break;
-        }
-        
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int b_idx = b_idx_row[k];
-            if (b_idx != -1) {
-                atomicAdd(&grad_weight[b_idx * output_size + l1_size + p_idx], gb_psqt);
             } else break;
         }
     }
