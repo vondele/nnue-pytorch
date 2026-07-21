@@ -1,6 +1,6 @@
 import torch
 from .sparse_linear_functions import SparseLinearFunction
-from .fused_ft_functions import FusedDoubleFtFunction, _HAS_CUPY_KERNELS
+from .fused_ft_functions import FusedDoubleFtFunction, _HAS_TRITON_KERNELS
 
 
 def double_feature_transform(
@@ -16,7 +16,7 @@ def double_feature_transform(
     backend: str = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Resolve backend
-    cupy_available = _HAS_CUPY_KERNELS
+    triton_available = _HAS_TRITON_KERNELS
     all_cuda = (
         us.is_cuda
         and them.is_cuda
@@ -26,7 +26,7 @@ def double_feature_transform(
         and weight.is_cuda
         and bias.is_cuda
     )
-    cuda_capable = cupy_available and all_cuda
+    cuda_capable = triton_available and all_cuda
 
     if backend == "auto":
         impl = "fused" if cuda_capable else "torch"
@@ -34,8 +34,8 @@ def double_feature_transform(
         impl = backend
 
     if impl == "fused":
-        if not cupy_available:
-            raise RuntimeError("Fused double FT backend requested, but CuPy kernels are not available.")
+        if not triton_available:
+            raise RuntimeError("Fused double FT backend requested, but Triton kernels are not available.")
         if not all_cuda:
             raise RuntimeError("Fused double FT backend requested, but not all tensors/parameters are on CUDA.")
         return FusedDoubleFtFunction.apply(
@@ -51,10 +51,9 @@ def double_feature_transform(
         )
     elif impl in ("sparse", "torch"):
         if impl == "sparse":
-            if not cupy_available:
-                raise RuntimeError("Sparse backend requested, but CuPy kernels are not available.")
-            if not all_cuda:
-                raise RuntimeError("Sparse backend requested, but not all tensors/parameters are on CUDA.")
+            # The sparse CUDA kernel was removed with the CuPy dependency.
+            # Fall through to the torch fallback.
+            impl = "torch"
 
         assert l1_size % 2 == 0
 

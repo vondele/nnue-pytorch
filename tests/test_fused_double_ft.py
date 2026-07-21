@@ -7,12 +7,12 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.modules.feature_transformer.double_ft_functions import double_feature_transform
-from model.modules.feature_transformer.fused_ft_functions import _HAS_CUPY_KERNELS
+from model.modules.feature_transformer.fused_ft_functions import _HAS_TRITON_KERNELS
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or not _HAS_CUPY_KERNELS,
-    reason="CUDA and CuPy required for custom kernel",
+    not torch.cuda.is_available() or not _HAS_TRITON_KERNELS,
+    reason="CUDA and Triton required for custom kernel",
 )
 def test_fused_double_ft():
     torch.manual_seed(0)

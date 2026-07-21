@@ -211,14 +211,14 @@ def validate_pytorchlightning():
         return False
 
 
-def validate_cupy():
-    pkg = PackageInfo("cupy")
+def validate_triton():
+    pkg = PackageInfo("triton")
     if pkg.exists:
-        LOGGER.info(f"Found cupy version {pkg.version}. OK.")
+        LOGGER.info(f"Found triton version {pkg.version}. OK.")
         return True
     else:
         LOGGER.error(
-            "No cupy found. Install cupy matching cuda version used by pytorch. See https://cupy.dev/. Exiting."
+            "No triton found. Install triton matching pytorch version. Exiting."
         )
         return False
 
@@ -241,7 +241,7 @@ def validate_imports():
     success &= validate_asciimatics()
     success &= validate_pytorch()
     success &= validate_pytorchlightning()
-    success &= validate_cupy()
+    success &= validate_triton()
     success &= validate_gputil()
     return success
 

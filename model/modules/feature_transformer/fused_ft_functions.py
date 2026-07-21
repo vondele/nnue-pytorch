@@ -1,14 +1,14 @@
 import torch
 from torch import autograd
-import numpy as np
 
-_HAS_CUPY_KERNELS = False
+_HAS_TRITON_KERNELS = False
 try:
-    from .fused_ft_kernel import (
-        make_fused_double_ft_forward_kernel,
-        make_fused_double_ft_backward_kernel,
+    import triton
+    from .triton_ft_kernel import (
+        fused_double_ft_forward,
+        fused_double_ft_backward,
     )
-    _HAS_CUPY_KERNELS = True
+    _HAS_TRITON_KERNELS = True
 except (ImportError, OSError, RuntimeError):
     pass
 
@@ -16,7 +16,6 @@ except (ImportError, OSError, RuntimeError):
 class FusedDoubleFtFunction(autograd.Function):
     @staticmethod
     def forward(ctx, us, them, white_indices, black_indices, psqt_indices, weight, bias, max_ft_activation, l1_size):
-        ctx.save_for_backward(us, them, white_indices, black_indices, psqt_indices, weight, bias)
         ctx.max_ft_activation = float(max_ft_activation)
         ctx.l1_size = int(l1_size)
 
@@ -44,34 +43,11 @@ class FusedDoubleFtFunction(autograd.Function):
         assert white_indices.is_contiguous() and black_indices.is_contiguous() and psqt_indices.is_contiguous()
         assert weight.is_contiguous() and bias.is_contiguous()
 
-        batch_size = white_indices.shape[0]
-        max_active_features = white_indices.shape[1]
-        l1_half = l1_size // 2
-
-        l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
-        wpsqt = torch.empty(batch_size, 1, dtype=torch.float32, device=us.device)
-        bpsqt = torch.empty(batch_size, 1, dtype=torch.float32, device=us.device)
-        clamped_out = torch.empty(batch_size, 4, l1_half, dtype=torch.float32, device=us.device)
-
-        output_size = bias.shape[0]
-        kernel = make_fused_double_ft_forward_kernel(max_active_features, l1_size)
-        kernel(
-            grid=(batch_size,),
-            args=(
-                us.data_ptr(),
-                them.data_ptr(),
-                white_indices.data_ptr(),
-                black_indices.data_ptr(),
-                psqt_indices.data_ptr(),
-                weight.data_ptr(),
-                bias.data_ptr(),
-                np.float32(max_ft_activation),
-                l0_.data_ptr(),
-                wpsqt.data_ptr(),
-                bpsqt.data_ptr(),
-                clamped_out.data_ptr(),
-                np.int32(output_size),
-            )
+        l0_, wpsqt, bpsqt, clamped_out = fused_double_ft_forward(
+            us, them,
+            white_indices, black_indices, psqt_indices,
+            weight, bias,
+            max_ft_activation, l1_size,
         )
 
         ctx.save_for_backward(us, them, white_indices, black_indices, psqt_indices, weight, bias, clamped_out)
@@ -87,33 +63,13 @@ class FusedDoubleFtFunction(autograd.Function):
         grad_wpsqt = grad_wpsqt.contiguous()
         grad_bpsqt = grad_bpsqt.contiguous()
 
-        batch_size = white_indices.shape[0]
-        max_active_features = white_indices.shape[1]
-        output_size = bias.shape[0]
-
-        grad_weight = torch.zeros(weight.shape[0], output_size, dtype=torch.float32, device=us.device)
-        grad_bias = torch.zeros(output_size, dtype=torch.float32, device=us.device)
-
-        kernel = make_fused_double_ft_backward_kernel(max_active_features, l1_size)
-        kernel(
-            grid=(batch_size,),
-            args=(
-                us.data_ptr(),
-                them.data_ptr(),
-                white_indices.data_ptr(),
-                black_indices.data_ptr(),
-                psqt_indices.data_ptr(),
-                weight.data_ptr(),
-                bias.data_ptr(),
-                np.float32(max_ft_activation),
-                grad_l0.data_ptr(),
-                grad_wpsqt.data_ptr(),
-                grad_bpsqt.data_ptr(),
-                clamped_out.data_ptr(),
-                grad_weight.data_ptr(),
-                grad_bias.data_ptr(),
-                np.int32(output_size),
-            )
+        grad_weight, grad_bias = fused_double_ft_backward(
+            us, them,
+            white_indices, black_indices, psqt_indices,
+            clamped_out, grad_l0,
+            grad_wpsqt, grad_bpsqt,
+            weight, bias,
+            max_ft_activation, l1_size,
         )
 
         return None, None, None, None, None, grad_weight, grad_bias, None, None

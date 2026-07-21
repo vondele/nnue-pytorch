@@ -12,3 +12,4 @@ tyro
 ruff
 pytest
 schedulefree
+triton>=3.0
