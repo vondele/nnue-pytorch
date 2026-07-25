@@ -23,8 +23,7 @@ __all__ = [
     "MixedSparseBatchProvider",
     "SparseBatchDataset",
     "SparseBatchProvider",
+    "SparseBatchPtr",
     "destroy_sparse_batch",
     "get_sparse_batch_from_fens",
-    # types
-    "SparseBatchPtr",
 ]

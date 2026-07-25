@@ -178,7 +178,7 @@ def main():
     actual_threads, actual_workers = args.threads, args.num_workers
 
     if not (0.0 <= args.cdb_fraction <= 1.0):
-        raise ValueError("--cdb-fraction must be in [0, 1], got {0}".format(args.cdb_fraction))
+        raise ValueError(f"--cdb-fraction must be in [0, 1], got {args.cdb_fraction}")
 
     if args.cdb_fraction > 0.0 and args.cdb_path is None:
         raise ValueError("--cdb-fraction > 0 requires --cdb-path")

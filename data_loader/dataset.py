@@ -106,7 +106,7 @@ class FenBatchProvider:
         try:
             if getattr(self, "stream", None) is not None:
                 stream.destroy_fen_batch_stream(self.stream)
-        except Exception:
+        except Exception:  # noqa: S110, BLE001
             pass
 
 
@@ -179,7 +179,7 @@ class TrainingDataProvider:
         try:
             if getattr(self, "stream", None) is not None:
                 self.destroy_stream(self.stream)
-        except Exception:
+        except Exception:  # noqa: S110, BLE001
             pass
 
 
@@ -260,11 +260,13 @@ class CDBSparseBatchProvider:
         batch_size,
         cyclic=True,
         num_workers=1,
-        config: DataloaderSkipConfig = DataloaderSkipConfig(),
+        config: DataloaderSkipConfig | None = None,
         ddp_config: DataloaderDDPConfig = None,
         use_pinned_memory=False,
         device="cpu",
     ):
+        if config is None:
+            config = DataloaderSkipConfig()
         self.feature_set = feature_set
         self.db_path = db_path
         self.batch_size = batch_size
@@ -302,7 +304,7 @@ class CDBSparseBatchProvider:
         try:
             if getattr(self, "stream", None) is not None:
                 stream.destroy_sparse_batch_stream(self.stream)
-        except Exception:
+        except Exception:  # noqa: S110, BLE001
             pass
 
 
@@ -314,10 +316,12 @@ class CDBSparseBatchDataset(torch.utils.data.IterableDataset):
         batch_size,
         cyclic=True,
         num_workers=1,
-        config: DataloaderSkipConfig = DataloaderSkipConfig(),
+        config: DataloaderSkipConfig | None = None,
         ddp_config: DataloaderDDPConfig = None,
         use_pinned_memory=False,
     ):
+        if config is None:
+            config = DataloaderSkipConfig()
         super().__init__()
         self.feature_set = feature_set
         self.db_path = db_path
@@ -384,12 +388,14 @@ class MixedSparseBatchDataset(torch.utils.data.IterableDataset):
         cdb_fraction: float,
         cyclic=True,
         num_workers=1,
-        config: DataloaderSkipConfig = DataloaderSkipConfig(),
+        config: DataloaderSkipConfig | None = None,
         ddp_config: DataloaderDDPConfig = None,
         use_pinned_memory=False,
         device="cpu",
         seed: int = 0,
     ):
+        if config is None:
+            config = DataloaderSkipConfig()
         super().__init__()
         self.feature_set = feature_set
         self.filenames = filenames
