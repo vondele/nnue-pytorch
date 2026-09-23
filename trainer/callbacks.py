@@ -347,6 +347,199 @@ class CheckpointManager(Callback):
             trainer.save_checkpoint(last_path)
 
 
+class UniquePositionLogger(Callback):
+    """Tracks approximate unique positions, total positions (after
+    filtering), and preskip positions (before filtering) seen by the
+    data loader, using HyperLogLog.
+
+    - Progress bar: shows this rank's live unique estimate, global
+      total (all_reduce SUM), and global preskip (all_reduce SUM).
+    - Epoch end: computes the accurate global unique via 1 MiB
+      register all_reduce MAX, gathers per-rank totals and preskips,
+      logs to CSV/TensorBoard.
+    - Checkpoint: stores the global merged HLL state, per-rank totals,
+      and per-rank preskips for race-free restore on restart.
+    """
+
+    HLL_REGISTER_COUNT = 1 << 20  # 2^20 = 1,048,576
+    HLL_HEADER_SIZE = 16
+    HLL_STATE_SIZE = HLL_HEADER_SIZE + HLL_REGISTER_COUNT
+
+    def __init__(self, train_dataset, rank=0, world_size=1):
+        super().__init__()
+        self.dataset = train_dataset
+        self.rank = rank
+        self.world_size = world_size
+        self._ddp = dist.is_available() and dist.is_initialized() and world_size > 1
+        # Stash for on_save_checkpoint (populated by on_train_epoch_end).
+        self._merged_hll_state = None
+        self._merged_per_rank_totals = None
+        self._merged_per_rank_preskips = None
+
+    def _get_local_stats(self):
+        """Return (preskip, total, unique) from the data loader."""
+        try:
+            return self.dataset.get_unique_stats()
+        except Exception:  # noqa: BLE001
+            return 0, 0, 0
+
+    def _global_sum(self, local_val):
+        """Cheap all_reduce SUM."""
+        if not self._ddp:
+            return local_val * self.world_size if self.world_size > 1 else local_val
+        tensor = torch.tensor([local_val], dtype=torch.int64, device="cuda" if torch.cuda.is_available() else "cpu")
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return int(tensor.item())
+
+    @torch.compiler.disable
+    def on_train_batch_end(self, trainer, batch=None, batch_idx=None, outputs=None):
+        _ = batch, batch_idx, outputs
+        # Only update on refresh boundary (same cadence as SimpleLineLogger).
+        # All ranks must participate in the all_reduce to avoid deadlock.
+        refresh = trainer.log_every_n_steps
+        current_step = (batch_idx or 0) + 1
+        if current_step % refresh != 0 and current_step != trainer.num_training_batches:
+            return
+
+        local_preskip, local_total, local_unique = self._get_local_stats()
+        global_total = self._global_sum(local_total)
+        global_preskip = self._global_sum(local_preskip)
+        if self.rank == 0:
+            trainer.callback_metrics["unique"] = float(local_unique)
+            trainer.callback_metrics["total"] = float(global_total)
+            trainer.callback_metrics["preskip"] = float(global_preskip)
+
+    @torch.compiler.disable
+    def on_train_epoch_end(self, trainer):
+        # Compute the accurate global unique via HLL register all_reduce MAX.
+        # All ranks participate in the collectives (no early return) to avoid
+        # deadlock.  The merged state is stashed for on_save_checkpoint, which
+        # is only invoked on rank 0 (via CheckpointManager) and therefore
+        # cannot use collectives itself.
+        local_preskip, local_total, _ = self._get_local_stats()
+        hll_bytes = self.dataset.get_hll_state()
+
+        if not hll_bytes or len(hll_bytes) < self.HLL_STATE_SIZE:
+            if self._ddp:
+                print(f"  [Warning] Rank {self.rank}: empty HLL state at epoch end, "
+                      f"skipping global merge.", flush=True)
+            self._merged_hll_state = None
+            self._merged_per_rank_totals = None
+            self._merged_per_rank_preskips = None
+            return
+
+        # Extract registers (skip 16-byte header)
+        registers = bytearray(hll_bytes[self.HLL_HEADER_SIZE:self.HLL_STATE_SIZE])
+
+        from data_loader.stream import hll_count_from_state
+
+        global_unique = 0
+        global_total = 0
+        global_preskip = 0
+
+        if self._ddp:
+            reg_tensor = torch.frombuffer(bytearray(registers), dtype=torch.uint8).clone()
+            reg_tensor = reg_tensor.cuda() if torch.cuda.is_available() else reg_tensor
+            dist.all_reduce(reg_tensor, op=dist.ReduceOp.MAX)
+            merged_regs = bytes(reg_tensor.cpu())
+
+            global_unique = hll_count_from_state(
+                bytes(hll_bytes[:self.HLL_HEADER_SIZE]) + merged_regs
+            )
+
+            val_tensor = torch.tensor(
+                [local_total], dtype=torch.int64,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            )
+            gathered = [torch.zeros_like(val_tensor) for _ in range(self.world_size)]
+            dist.all_gather(gathered, val_tensor)
+            per_rank_totals = [int(t.item()) for t in gathered]
+            global_total = sum(per_rank_totals)
+
+            preskip_tensor = torch.tensor(
+                [local_preskip], dtype=torch.int64,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            )
+            gathered_preskip = [torch.zeros_like(preskip_tensor) for _ in range(self.world_size)]
+            dist.all_gather(gathered_preskip, preskip_tensor)
+            per_rank_preskips = [int(t.item()) for t in gathered_preskip]
+            global_preskip = sum(per_rank_preskips)
+        else:
+            global_unique = hll_count_from_state(hll_bytes)
+            global_total = local_total * self.world_size if self.world_size > 1 else local_total
+            per_rank_totals = [local_total] if self.world_size == 1 else \
+                              [local_total] * self.world_size
+            global_preskip = local_preskip * self.world_size if self.world_size > 1 else local_preskip
+            per_rank_preskips = [local_preskip] if self.world_size == 1 else \
+                                [local_preskip] * self.world_size
+            merged_regs = bytes(registers)
+
+        # Stash for on_save_checkpoint (non-collective).
+        self._merged_hll_state = bytes(hll_bytes[:self.HLL_HEADER_SIZE]) + merged_regs
+        self._merged_per_rank_totals = per_rank_totals
+        self._merged_per_rank_preskips = per_rank_preskips
+
+        trainer.callback_metrics["unique_global"] = float(global_unique)
+        trainer.callback_metrics["total_global"] = float(global_total)
+        trainer.callback_metrics["preskip_global"] = float(global_preskip)
+        trainer._log_metrics(
+            {"unique_global": global_unique, "total_global": global_total,
+             "preskip_global": global_preskip},
+            step=trainer.global_step,
+        )
+
+    @torch.compiler.disable
+    def on_save_checkpoint(self, trainer, checkpoint):
+        # No collectives here — on_save_checkpoint is only invoked on rank 0
+        # (via CheckpointManager.on_train_epoch_end → trainer.save_checkpoint).
+        # The merged state was computed in on_train_epoch_end where all ranks
+        # participate in the all_reduce.
+        if self._merged_hll_state is None or self._merged_per_rank_totals is None:
+            return
+
+        if self.rank == 0:
+            checkpoint["dataloader_hll"] = self._merged_hll_state
+            checkpoint["dataloader_total_per_rank"] = self._merged_per_rank_totals
+            checkpoint["dataloader_preskip_per_rank"] = self._merged_per_rank_preskips
+
+    @torch.compiler.disable
+    def on_load_checkpoint(self, trainer, checkpoint):
+        hll_bytes = checkpoint.get("dataloader_hll")
+        per_rank_totals = checkpoint.get("dataloader_total_per_rank")
+        per_rank_preskips = checkpoint.get("dataloader_preskip_per_rank")
+        if not hll_bytes or not per_rank_totals:
+            return
+
+        # The HLL registers are always the global merged state (same on
+        # all ranks).  The per-rank totals and preskips must each sum
+        # to their respective global totals.  When the number of ranks
+        # at restart differs from the checkpoint, redistribute evenly.
+        global_total = sum(per_rank_totals)
+        if self.world_size == len(per_rank_totals):
+            initial_total = per_rank_totals[self.rank]
+        else:
+            base = global_total // self.world_size
+            remainder = global_total % self.world_size
+            initial_total = base + (1 if self.rank < remainder else 0)
+
+        if per_rank_preskips:
+            global_preskip = sum(per_rank_preskips)
+            if self.world_size == len(per_rank_preskips):
+                initial_preskip = per_rank_preskips[self.rank]
+            else:
+                base = global_preskip // self.world_size
+                remainder = global_preskip % self.world_size
+                initial_preskip = base + (1 if self.rank < remainder else 0)
+        else:
+            # Backward compatibility: old checkpoints without preskip.
+            initial_preskip = 0
+
+        try:
+            self.dataset.set_initial_hll(hll_bytes, initial_total, initial_preskip)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [Warning] Failed to restore HLL state: {e}", flush=True)
+
+
 class SimpleLineLogger(Callback):
     def __init__(
         self,
@@ -413,6 +606,14 @@ class SimpleLineLogger(Callback):
                 self.train_metric_step, float("nan")
             )
 
+            unique_val = trainer.callback_metrics.get("unique", None)
+            total_val = trainer.callback_metrics.get("total", None)
+            preskip_val = trainer.callback_metrics.get("preskip", None)
+
+            unique_str = f"unique={unique_val:.0f}, " if unique_val is not None else ""
+            total_str = f"total={total_val:.0f}, " if total_val is not None else ""
+            preskip_str = f"preskip={preskip_val:.0f}, " if preskip_val is not None else ""
+
             print(
                 f"Epoch {trainer.current_epoch:>2} (Train): "
                 f"{current_step / total_batches:>4.0%}| "
@@ -420,6 +621,7 @@ class SimpleLineLogger(Callback):
                 f"[{self._format_time(elapsed_total)}<{self._format_time(remaining)}, "
                 f"{rate:>6.2f}it/s, "
                 f"{self.train_metric_step}={loss_val:.5f}, "
+                f"{unique_str}{total_str}{preskip_str}"
                 f"v_num={trainer.logger.version}]",
                 flush=True,
             )
