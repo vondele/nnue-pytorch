@@ -352,12 +352,11 @@ class UniquePositionLogger(Callback):
     filtering), and preskip positions (before filtering) seen by the
     data loader, using HyperLogLog.
 
-    - on_train_batch_end (refresh): computes the accurate global
-      unique via 1 MiB register all_reduce MAX, gathers per-rank
-      totals and preskips, updates the progress bar, and stashes
-      the merged state.  All ranks participate in the collectives.
-    - on_train_epoch_end: logs the stashed global values to
-      CSV/TensorBoard (no collectives — deadlock-free).
+    - on_train_epoch_end: one synchronization per epoch —
+      all_reduce(MAX) of 1 MiB HLL registers for accurate global
+      unique, all_gather of per-rank totals and preskips.  Results
+      are logged to CSV/TensorBoard and printed on the epoch summary
+      line.  The merged state is stashed for on_save_checkpoint.
     - Checkpoint: stores the global merged HLL state, per-rank
       totals, and per-rank preskips for race-free restore on restart.
     """
@@ -372,13 +371,10 @@ class UniquePositionLogger(Callback):
         self.rank = rank
         self.world_size = world_size
         self._ddp = dist.is_available() and dist.is_initialized() and world_size > 1
-        # Stash for on_save_checkpoint and on_train_epoch_end.
+        # Stash for on_save_checkpoint.
         self._merged_hll_state = None
         self._merged_per_rank_totals = None
         self._merged_per_rank_preskips = None
-        self._global_unique = 0
-        self._global_total = 0
-        self._global_preskip = 0
 
     def _get_local_stats(self):
         """Return (preskip, total, unique) from the data loader."""
@@ -387,15 +383,17 @@ class UniquePositionLogger(Callback):
         except Exception:  # noqa: BLE001
             return 0, 0, 0
 
-    def _compute_global_stats(self):
-        """Merge local HLL registers across all ranks via all_reduce(MAX),
-        gather per-rank totals and preskips via all_gather(SUM), and
-        compute the accurate global unique count.
+    @torch.compiler.disable
+    def on_train_batch_end(self, trainer, batch=None, batch_idx=None, outputs=None):
+        pass
 
-        All ranks must call this (no early return) to avoid deadlock.
-        Returns (global_unique, global_total, global_preskip,
-                 merged_hll_state, per_rank_totals, per_rank_preskips).
-        """
+    @torch.compiler.disable
+    def on_train_epoch_end(self, trainer):
+        # One synchronization point per epoch.  All ranks participate
+        # (no early return) to avoid deadlock.  This runs before
+        # CheckpointManager.on_train_epoch_end (which calls
+        # trainer.save_checkpoint → on_save_checkpoint), so the stash
+        # is up to date when the checkpoint is written.
         from data_loader.stream import hll_count_from_state
 
         local_preskip, local_total, _local_unique = self._get_local_stats()
@@ -403,9 +401,12 @@ class UniquePositionLogger(Callback):
 
         if not hll_bytes or len(hll_bytes) < self.HLL_STATE_SIZE:
             if self._ddp:
-                print(f"  [Warning] Rank {self.rank}: empty HLL state, "
+                print(f"  [Warning] Rank {self.rank}: empty HLL state at epoch end, "
                       f"skipping global merge.", flush=True)
-            return 0, 0, 0, None, None, None
+            self._merged_hll_state = None
+            self._merged_per_rank_totals = None
+            self._merged_per_rank_preskips = None
+            return
 
         # Extract registers (skip 16-byte header)
         registers = bytearray(hll_bytes[self.HLL_HEADER_SIZE:self.HLL_STATE_SIZE])
@@ -447,55 +448,22 @@ class UniquePositionLogger(Callback):
                                 [local_preskip] * self.world_size
             merged_regs = bytes(registers)
 
-        merged_hll_state = bytes(hll_bytes[:self.HLL_HEADER_SIZE]) + merged_regs
-        return global_unique, global_total, global_preskip, \
-               merged_hll_state, per_rank_totals, per_rank_preskips
-
-    @torch.compiler.disable
-    def on_train_batch_end(self, trainer, batch=None, batch_idx=None, outputs=None):
-        _ = batch, batch_idx, outputs
-        # Only update on refresh boundary (same cadence as SimpleLineLogger).
-        # All ranks must participate in the collectives to avoid deadlock.
-        refresh = trainer.log_every_n_steps
-        current_step = (batch_idx or 0) + 1
-        if current_step % refresh != 0 and current_step != trainer.num_training_batches:
-            return
-
-        global_unique, global_total, global_preskip, \
-            merged_hll, per_rank_totals, per_rank_preskips = \
-            self._compute_global_stats()
-
-        # Stash for on_save_checkpoint and on_train_epoch_end.
-        self._merged_hll_state = merged_hll
+        # Stash for on_save_checkpoint (non-collective).
+        self._merged_hll_state = bytes(hll_bytes[:self.HLL_HEADER_SIZE]) + merged_regs
         self._merged_per_rank_totals = per_rank_totals
         self._merged_per_rank_preskips = per_rank_preskips
-        self._global_unique = global_unique
-        self._global_total = global_total
-        self._global_preskip = global_preskip
 
-        if self.rank == 0:
-            trainer.callback_metrics["unique"] = float(global_unique)
-            trainer.callback_metrics["total"] = float(global_total)
-            trainer.callback_metrics["preskip"] = float(global_preskip)
+        # Set callback_metrics so SimpleLineLogger can print them.
+        trainer.callback_metrics["unique"] = float(global_unique)
+        trainer.callback_metrics["total"] = float(global_total)
+        trainer.callback_metrics["preskip"] = float(global_preskip)
 
-    @torch.compiler.disable
-    def on_train_epoch_end(self, trainer):
-        # No collectives here — the global state was computed in
-        # on_train_batch_end (at the last refresh of this epoch) where
-        # all ranks participate.  This is also called before
-        # CheckpointManager.on_train_epoch_end (which calls
-        # trainer.save_checkpoint → on_save_checkpoint), so the stash
-        # is up to date.
-        if self._merged_hll_state is None:
-            return
-
-        trainer.callback_metrics["unique_global"] = float(self._global_unique)
-        trainer.callback_metrics["total_global"] = float(self._global_total)
-        trainer.callback_metrics["preskip_global"] = float(self._global_preskip)
+        trainer.callback_metrics["unique_global"] = float(global_unique)
+        trainer.callback_metrics["total_global"] = float(global_total)
+        trainer.callback_metrics["preskip_global"] = float(global_preskip)
         trainer._log_metrics(
-            {"unique_global": self._global_unique,
-             "total_global": self._global_total,
-             "preskip_global": self._global_preskip},
+            {"unique_global": global_unique, "total_global": global_total,
+             "preskip_global": global_preskip},
             step=trainer.global_step,
         )
 
@@ -614,14 +582,6 @@ class SimpleLineLogger(Callback):
                 self.train_metric_step, float("nan")
             )
 
-            unique_val = trainer.callback_metrics.get("unique", None)
-            total_val = trainer.callback_metrics.get("total", None)
-            preskip_val = trainer.callback_metrics.get("preskip", None)
-
-            unique_str = f"unique={unique_val:.0f}, " if unique_val is not None else ""
-            total_str = f"total={total_val:.0f}, " if total_val is not None else ""
-            preskip_str = f"preskip={preskip_val:.0f}, " if preskip_val is not None else ""
-
             print(
                 f"Epoch {trainer.current_epoch:>2} (Train): "
                 f"{current_step / total_batches:>4.0%}| "
@@ -629,7 +589,6 @@ class SimpleLineLogger(Callback):
                 f"[{self._format_time(elapsed_total)}<{self._format_time(remaining)}, "
                 f"{rate:>6.2f}it/s, "
                 f"{self.train_metric_step}={loss_val:.5f}, "
-                f"{unique_str}{total_str}{preskip_str}"
                 f"v_num={trainer.logger.version}]",
                 flush=True,
             )
@@ -643,9 +602,18 @@ class SimpleLineLogger(Callback):
             return
 
         train_loss = trainer.callback_metrics.get(self.train_metric_epoch, float("nan"))
+        unique_val = trainer.callback_metrics.get("unique", None)
+        total_val = trainer.callback_metrics.get("total", None)
+        preskip_val = trainer.callback_metrics.get("preskip", None)
+
+        unique_str = f", unique={unique_val:.0f}" if unique_val is not None else ""
+        total_str = f", total={total_val:.0f}" if total_val is not None else ""
+        preskip_str = f", preskip={preskip_val:.0f}" if preskip_val is not None else ""
+
         print(
             f"Epoch {trainer.current_epoch:>2} (Train): "
-            f"[{self.train_metric_epoch}={train_loss:.5f}]",
+            f"[{self.train_metric_epoch}={train_loss:.5f}"
+            f"{unique_str}{total_str}{preskip_str}]",
             flush=True,
         )
 
