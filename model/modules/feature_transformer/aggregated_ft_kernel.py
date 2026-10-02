@@ -130,6 +130,63 @@ extern "C" __global__ void ft_aggregate_backward(const float *us, const float *t
     if (bias1 != 0)
         atomicAdd(gb + HALF + col, bias1);
 }
+
+/* uint8 clamped_out variants: clamped values are k/256 levels; the STE gates
+   compare quantization levels instead of floats, multipliers are k/256. */
+extern "C" __global__ void ft_aggregate_backward_u8(
+    const float *us, const float *them,
+    const float *gl, const unsigned char *cl, int maxact_k,
+    const int *ids,
+    const unsigned *masks, const int *counts,
+    float *gw, float *gb, int batch_size) {
+    __shared__ float g[2 * T][(2*B)];
+    unsigned tid = threadIdx.x, col = tid + B * blockIdx.y;
+    float bias0 = 0, bias1 = 0;
+    for (int t = 0; t < T; ++t) {
+        int row = blockIdx.x * T + t;
+        if (row >= batch_size)
+            break;
+        float w0 = cl[row * (2*K) + col] * (1.0f/256.0f), w1 = cl[row * (2*K) + HALF + col] * (1.0f/256.0f);
+        float b0 = cl[row * (2*K) + K + col] * (1.0f/256.0f), b1 = cl[row * (2*K) + (3*HALF) + col] * (1.0f/256.0f);
+        unsigned kw0 = cl[row * (2*K) + col], kw1 = cl[row * (2*K) + HALF + col];
+        unsigned kb0 = cl[row * (2*K) + K + col], kb1 = cl[row * (2*K) + (3*HALF) + col];
+        float d0 = gl[row * K + col], d1 = gl[row * K + HALF + col];
+        float dw0 = (kw0 == 0 || kw0 == (unsigned)maxact_k) ? 0 : d0 * w1;
+        float dw1 = (kw1 == 0 || kw1 == (unsigned)maxact_k) ? 0 : d0 * w0;
+        float db0 = (kb0 == 0 || kb0 == (unsigned)maxact_k) ? 0 : d1 * b1;
+        float db1 = (kb1 == 0 || kb1 == (unsigned)maxact_k) ? 0 : d1 * b0;
+        float u = us[row], v = them[row];
+        float gw0 = u * dw0 + v * db0, gw1 = u * dw1 + v * db1;
+        float gb0 = v * dw0 + u * db0, gb1 = v * dw1 + u * db1;
+        g[2 * t][tid] = gw0;
+        g[2 * t][tid + B] = gw1;
+        g[2 * t + 1][tid] = gb0;
+        g[2 * t + 1][tid + B] = gb1;
+        bias0 += gw0 + gb0;
+        bias1 += gw1 + gb1;
+    }
+    __syncthreads();
+    int n = counts[blockIdx.x];
+    for (int i = 0; i < n; ++i) {
+        size_t id = (unsigned)ids[blockIdx.x * M + i];
+        unsigned mask = masks[blockIdx.x * M + i];
+        int r = __ffs(mask) - 1;
+        float v0 = g[r][tid], v1 = g[r][tid + B];
+        while ((mask &= mask - 1)) {
+            r = __ffs(mask) - 1;
+            v0 += g[r][tid];
+            v1 += g[r][tid + B];
+        }
+        if (v0 != 0)
+            atomicAdd(gw + id * K + col, v0);
+        if (v1 != 0)
+            atomicAdd(gw + id * K + HALF + col, v1);
+    }
+    if (bias0 != 0)
+        atomicAdd(gb + col, bias0);
+    if (bias1 != 0)
+        atomicAdd(gb + HALF + col, bias1);
+}
 """
     )
     pack = cp.RawKernel(code, "ft_pack_features")
@@ -137,7 +194,9 @@ extern "C" __global__ void ft_aggregate_backward(const float *us, const float *t
     pack.max_dynamic_shared_size_bytes = h * 8
     aggregate = cp.RawKernel(code, "ft_aggregate_backward")
     aggregate.compile()
-    return pack, aggregate, maxids, h * 8, threads
+    aggregate_u8 = cp.RawKernel(code, "ft_aggregate_backward_u8")
+    aggregate_u8.compile()
+    return pack, aggregate, aggregate_u8, maxids, h * 8, threads
 
 
 @torch.compiler.disable
@@ -152,7 +211,7 @@ def aggregated_ft_backward(
     batch_size, active = white.shape
     tiles = (batch_size + 7) // 8
     with cp.cuda.Device(us.device.index):
-        pack, aggregate, capacity, shared_bytes, threads = _kernels(active, grad.shape[1])
+        pack, aggregate, _aggregate_u8, capacity, shared_bytes, threads = _kernels(active, grad.shape[1])
         ids = torch.empty((tiles, capacity), device=us.device, dtype=torch.int32)
         masks = torch.empty_like(ids)
         counts = torch.empty(tiles, device=us.device, dtype=torch.int32)
@@ -180,3 +239,41 @@ def aggregated_ft_backward(
         with cp.cuda.ExternalStream(torch.cuda.current_stream(us.device).cuda_stream):
             pack((tiles,), (512,), pack_args, shared_mem=shared_bytes)
             aggregate((tiles, grad.shape[1] // (2 * threads)), (threads,), backward_args)
+
+
+@torch.compiler.disable
+def aggregated_ft_backward_u8(
+    us, them, white, black, grad, clamped, grad_weight, grad_bias, maxact_k
+):
+    """uint8 clamped_out variant of aggregated_ft_backward."""
+    batch_size, active = white.shape
+    tiles = (batch_size + 7) // 8
+    with cp.cuda.Device(us.device.index):
+        pack, _aggregate, aggregate_u8, capacity, shared_bytes, threads = _kernels(active, grad.shape[1])
+        ids = torch.empty((tiles, capacity), device=us.device, dtype=torch.int32)
+        masks = torch.empty_like(ids)
+        counts = torch.empty(tiles, device=us.device, dtype=torch.int32)
+        pack_args = (
+            white.data_ptr(),
+            black.data_ptr(),
+            ids.data_ptr(),
+            masks.data_ptr(),
+            counts.data_ptr(),
+            np.int32(batch_size),
+        )
+        backward_args = (
+            us.data_ptr(),
+            them.data_ptr(),
+            grad.data_ptr(),
+            clamped.data_ptr(),
+            np.int32(maxact_k),
+            ids.data_ptr(),
+            masks.data_ptr(),
+            counts.data_ptr(),
+            grad_weight.data_ptr(),
+            grad_bias.data_ptr(),
+            np.int32(batch_size),
+        )
+        with cp.cuda.ExternalStream(torch.cuda.current_stream(us.device).cuda_stream):
+            pack((tiles,), (512,), pack_args, shared_mem=shared_bytes)
+            aggregate_u8((tiles, grad.shape[1] // (2 * threads)), (threads,), backward_args)

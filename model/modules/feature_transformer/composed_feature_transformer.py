@@ -3,6 +3,8 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
+import os
+
 from ...quantize import QuantizationManager
 from ..features.input_feature import InputFeature
 from .double_ft_functions import double_feature_transform
@@ -100,6 +102,23 @@ class ComposedFeatureTransformer(nn.Module):
         for f in self.features:
             f.clip_weights(quantization)
 
+    def _int16_backend_ok(self, fake_quantize_weights: bool) -> bool:
+        """Static eligibility of the int16 FT kernels for this configuration.
+
+        The weight and bias must be fake-quantized on the k/256 grid (default
+        scales, so the int16 table round-trips exactly) and the FT clamp level
+        must be an exact uint8 quantization step. NNUE_FT_INT16=0 disables.
+        """
+        if os.environ.get("NNUE_FT_INT16", "1") != "1":
+            return False
+        if not fake_quantize_weights:
+            return False
+        scales = self.quantization.weight_scales_dict
+        if scales["ft_weight"] != 256.0 or scales["ft_bias"] != 256.0:
+            return False
+        level = self.quantization.max_ft_activation * 256.0
+        return level == int(level) and 0 < int(level) <= 255
+
     def forward(
         self,
         us: torch.Tensor,
@@ -114,6 +133,11 @@ class ComposedFeatureTransformer(nn.Module):
             fake_quantize_weights
         )
         ft_max_act = self.quantization.max_ft_activation
+
+        if backend == "auto" and self._int16_backend_ok(fake_quantize_weights):
+            # int16_ft_available re-checks the runtime tensor conditions and
+            # falls back to the fp32 kernels when they do not hold.
+            backend = "fused_int16"
 
         l0_ = double_feature_transform(
             us,

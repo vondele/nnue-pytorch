@@ -1,6 +1,11 @@
 import torch
 
-from .fused_ft_functions import _HAS_CUPY_KERNELS, FusedDoubleFtFunction
+from .fused_ft_functions import (
+    _HAS_CUPY_KERNELS,
+    FusedDoubleFtFunction,
+    FusedDoubleFtIntFunction,
+    int16_ft_available,
+)
 from .sparse_linear_functions import SparseLinearFunction
 
 
@@ -32,6 +37,26 @@ def double_feature_transform(
     else:
         impl = backend
 
+    if impl == "fused_int16":
+        if not int16_ft_available(weight, bias, max_ft_activation, l1_size):
+            if backend == "fused_int16":
+                raise RuntimeError(
+                    "int16 fused double FT backend requested, but eligibility "
+                    "failed (CuPy kernels, CUDA tensors, k/256 grid scales, or "
+                    "the clamp level not an exact uint8 step)."
+                )
+            impl = "fused"
+        else:
+            return FusedDoubleFtIntFunction.apply(
+                us,
+                them,
+                white_indices,
+                black_indices,
+                weight,
+                bias,
+                max_ft_activation,
+                l1_size,
+            )
     if impl == "fused":
         if not cupy_available:
             raise RuntimeError("Fused double FT backend requested, but CuPy kernels are not available.")
