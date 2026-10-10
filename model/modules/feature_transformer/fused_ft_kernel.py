@@ -18,16 +18,20 @@ def _num_threads(l1_half: int, target: int) -> int:
 _fused_double_ft_forward_kernel_cache = {}
 
 @torch.compiler.disable(recursive=False)
-def make_fused_double_ft_forward_kernel(max_active_indices: int, l1_size: int):
+def make_fused_double_ft_forward_kernel(max_active_indices: int, l1_size: int, storage: str = "fp32"):
     l1_half = l1_size // 2
     target = 256 if l1_size % 128 == 0 and torch.version.hip is None and torch.cuda.get_device_capability() == (9, 0) else _FORWARD_THREADS
     num_threads = _num_threads(l1_half, target)
     output_thread_slice_size = l1_half // num_threads
 
-    key = (max_active_indices, l1_size, num_threads)
+    dtype = {"fp32": "float", "fp16": "__half"}[storage]
+    load = {"fp32": "value", "fp16": "__half2float(value)"}[storage]
+    prefix = "#include <cuda_fp16.h>\n"
+    prefix += f"typedef {dtype} storage_t;\n__device__ __forceinline__ float load_ft(storage_t value) {{ return {load}; }}\n"
+    key = (max_active_indices, l1_size, num_threads, storage)
     if key not in _fused_double_ft_forward_kernel_cache:
         kernel = cp.RawKernel(
-            r"""
+            prefix + r"""
 typedef unsigned int uint32_t;
 typedef int int32_t;
 typedef long long int64_t;
@@ -38,7 +42,7 @@ void fused_double_ft_forward(
     const float* __restrict__ them,
     const int32_t* __restrict__ white_indices,
     const int32_t* __restrict__ black_indices,
-    const float* __restrict__ weight,
+    const storage_t* __restrict__ weight,
     const float* __restrict__ bias,
     const float          max_ft_act,
           float* __restrict__ l0_out,
@@ -81,12 +85,12 @@ void fused_double_ft_forward(
         for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
             uint32_t i = s * n_threads + tid;
             if (wi >= 0) {
-                w0[s] += __ldg(&weight[(size_t)(unsigned)wi * l1_size + i]);
-                w1[s] += __ldg(&weight[(size_t)(unsigned)wi * l1_size + i + l1_half]);
+                w0[s] += load_ft(__ldg(&weight[(size_t)(unsigned)wi * l1_size + i]));
+                w1[s] += load_ft(__ldg(&weight[(size_t)(unsigned)wi * l1_size + i + l1_half]));
             }
             if (bi >= 0) {
-                b0[s] += __ldg(&weight[(size_t)(unsigned)bi * l1_size + i]);
-                b1[s] += __ldg(&weight[(size_t)(unsigned)bi * l1_size + i + l1_half]);
+                b0[s] += load_ft(__ldg(&weight[(size_t)(unsigned)bi * l1_size + i]));
+                b1[s] += load_ft(__ldg(&weight[(size_t)(unsigned)bi * l1_size + i + l1_half]));
             }
         }
     }
