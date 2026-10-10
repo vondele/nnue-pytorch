@@ -50,13 +50,16 @@ class FusedDoubleFtFunction(autograd.Function):
         clamped_out = torch.empty(batch_size, 4, l1_half, dtype=torch.float32, device=us.device)
 
         output_size = bias.shape[0]
-        # Compact forward buffers are automatic for the measured H100 training
-        # shapes. Master parameters, autograd gradients and optimizer states
-        # stay FP32; only the kernel-side forward weight copy is rounded.
-        ctx.compact_forward = (512 <= l1_size <= 4096 and l1_size % 128 == 0 and batch_size >= 1024
-                               and 0 < max_active_features <= 288
-                               and torch.version.hip is None
-                               and torch.cuda.get_device_capability(us.device) == (9, 0))
+        # Both compact paths (FP16 forward weight buffers; scaled half2
+        # gradient accumulation with on-device FP32 recovery) are automatic
+        # for the measured H100 training shapes. Master parameters, autograd
+        # gradients and optimizer states stay FP32.
+        compact_shape = (512 <= l1_size <= 4096 and l1_size % 128 == 0 and batch_size >= 1024
+                         and 0 < max_active_features <= 288
+                         and torch.version.hip is None
+                         and torch.cuda.get_device_capability(us.device) == (9, 0))
+        ctx.compact_forward = compact_shape
+        ctx.compact_backward = compact_shape
         use_half = ctx.compact_forward or (torch.is_autocast_enabled("cuda")
                                            and torch.get_autocast_dtype("cuda") == torch.float16)
         storage = "fp16" if use_half else "fp32"
@@ -93,7 +96,10 @@ class FusedDoubleFtFunction(autograd.Function):
         max_active_features = white_indices.shape[1]
         output_size = bias.shape[0]
 
-        grad_weight = torch.zeros(weight.shape[0], output_size, dtype=torch.float32, device=us.device)
+        # Compact mode fully overwrites grad_weight during unpacking, so the
+        # FP32 output buffer needs no zero-initialization.
+        allocate = torch.empty if ctx.compact_backward else torch.zeros
+        grad_weight = allocate(weight.shape[0], output_size, dtype=torch.float32, device=us.device)
         grad_bias = torch.zeros(output_size, dtype=torch.float32, device=us.device)
 
         # Aggregation pays for its feature-union pass on large master-net batches.
@@ -104,7 +110,7 @@ class FusedDoubleFtFunction(autograd.Function):
                 and torch.cuda.get_device_capability(us.device) == (9, 0)):
             aggregated_ft_backward(
                 us, them, white_indices, black_indices, grad_l0, clamped_out,
-                grad_weight, grad_bias, max_ft_activation,
+                grad_weight, grad_bias, max_ft_activation, compact=ctx.compact_backward,
             )
             return None, None, None, None, grad_weight, grad_bias, None, None
 
