@@ -2,6 +2,8 @@
 
 Pack the union of features in eight positions with a position/perspective mask.
 Each column block sums those contributions before issuing global atomics.
+The experimental compact path uses scaled FP16 pairs and recomputes in FP32
+on overflow, entirely on the current CUDA stream.
 Feature indices must be unique within each position/perspective, as guaranteed
 by the feature extractors. Repeated indices across rows are aggregated exactly
 apart from floating-point rounding.
@@ -17,14 +19,35 @@ from .fused_ft_kernel import _num_threads
 
 
 @cache
-def _kernels(active: int, width: int):
+def _kernels(active: int, width: int, compact: bool = False, fallback: bool = False):
     A = active
     half = width // 2
     threads = _num_threads(half, 128)
     tile = 8
     maxids = 2 * tile * A
     h = 1 << (maxids - 1).bit_length()
+    prefix = f"#define COMPACT {int(compact)}\n#define FALLBACK {int(fallback)}\n"
+    prefix += r"""
+#include <cuda_fp16.h>
+#if COMPACT
+typedef __half grad_t;
+__device__ __forceinline__ void add_grad(grad_t* p, float v) {
+    // Whole warps participate; adjacent lanes address aligned column pairs.
+    float other = __shfl_down_sync(0xffffffffu, v, 1);
+    if ((threadIdx.x & 1) == 0 && (v != 0 || other != 0)) {
+        __half2 h = __floats2half2_rn(v * 65536.0f, other * 65536.0f);
+        unsigned packed = *reinterpret_cast<unsigned*>(&h);
+        asm volatile("red.relaxed.gpu.global.add.noftz.f16x2 [%0], %1;"
+                     :: "l"(p), "r"(packed) : "memory");
+    }
+}
+#else
+typedef float grad_t;
+__device__ __forceinline__ void add_grad(grad_t* p, float v) { atomicAdd(p, v); }
+#endif
+"""
     code = (
+        prefix +
         f"#define T {tile}\n#define A {A}\n#define H {h}\n#define M {maxids}\n"
         f"#define K {width}\n#define HALF {half}\n#define B {threads}\n"
         + r"""
@@ -80,7 +103,8 @@ extern "C" __global__ void ft_aggregate_backward(const float *us, const float *t
                                                  const float *gl, const float *cl, float maxact,
                                                  const int *ids,
                                                  const unsigned *masks, const int *counts,
-                                                 float *gw, float *gb, int batch_size) {
+                                                 grad_t *gw, float *gb, int batch_size, const int *overflow) {
+    if (FALLBACK && !*overflow) return;
     __shared__ float g[2 * T][(2*B)];
     unsigned tid = threadIdx.x, col = tid + B * blockIdx.y;
     float bias0 = 0, bias1 = 0;
@@ -120,14 +144,14 @@ extern "C" __global__ void ft_aggregate_backward(const float *us, const float *t
             v0 += g[r][tid];
             v1 += g[r][tid + B];
         }
-        if (v0 != 0)
-            atomicAdd(gw + id * K + col, v0);
-        if (v1 != 0)
-            atomicAdd(gw + id * K + HALF + col, v1);
+        if (COMPACT || v0 != 0)
+            add_grad(gw + id * K + col, v0);
+        if (COMPACT || v1 != 0)
+            add_grad(gw + id * K + HALF + col, v1);
     }
-    if (bias0 != 0)
+    if (!FALLBACK && bias0 != 0)
         atomicAdd(gb + col, bias0);
-    if (bias1 != 0)
+    if (!FALLBACK && bias1 != 0)
         atomicAdd(gb + HALF + col, bias1);
 }
 """
@@ -142,17 +166,20 @@ extern "C" __global__ void ft_aggregate_backward(const float *us, const float *t
 
 @torch.compiler.disable
 def aggregated_ft_backward(
-    us, them, white, black, grad, clamped, grad_weight, grad_bias, maxact
+    us, them, white, black, grad, clamped, grad_weight, grad_bias, maxact, compact=False
 ):
-    """Accumulate on the current stream.
+    """Accumulate on the current stream; compact mode overwrites grad_weight.
 
-    Biases always accumulate in FP32.  Nonnegative feature indices must be
-    unique within each white/black row.
+    Biases always accumulate in FP32. Compact weight gradients are scaled by
+    65536 to reduce underflow, then unpacked into FP32 for autograd/DDP/Adam.
+    Nonfinite half accumulations trigger a conditional FP32 recomputation;
+    there is no host read or synchronization in the normal path.
+    Nonnegative feature indices must be unique within each white/black row.
     """
     batch_size, active = white.shape
     tiles = (batch_size + 7) // 8
     with cp.cuda.Device(us.device.index):
-        pack, aggregate, capacity, shared_bytes, threads = _kernels(active, grad.shape[1])
+        pack, aggregate, capacity, shared_bytes, threads = _kernels(active, grad.shape[1], compact)
         ids = torch.empty((tiles, capacity), device=us.device, dtype=torch.int32)
         masks = torch.empty_like(ids)
         counts = torch.empty(tiles, device=us.device, dtype=torch.int32)
@@ -164,6 +191,8 @@ def aggregated_ft_backward(
             counts.data_ptr(),
             np.int32(batch_size),
         )
+        work_weight = torch.zeros_like(grad_weight, dtype=torch.float16) if compact else grad_weight
+        overflow = torch.zeros(1, device=us.device, dtype=torch.int32) if compact else None
         backward_args = (
             us.data_ptr(),
             them.data_ptr(),
@@ -173,10 +202,46 @@ def aggregated_ft_backward(
             ids.data_ptr(),
             masks.data_ptr(),
             counts.data_ptr(),
-            grad_weight.data_ptr(),
+            work_weight.data_ptr(),
             grad_bias.data_ptr(),
             np.int32(batch_size),
+            overflow.data_ptr() if compact else 0,
         )
         with cp.cuda.ExternalStream(torch.cuda.current_stream(us.device).cuda_stream):
             pack((tiles,), (512,), pack_args, shared_mem=shared_bytes)
             aggregate((tiles, grad.shape[1] // (2 * threads)), (threads,), backward_args)
+
+            if compact:
+                unpack, clear = _conversion_kernels()
+                pairs = grad_weight.numel() // 2
+                grid = ((pairs + 255) // 256,)
+                unpack(grid, (256,), (work_weight.data_ptr(), grad_weight.data_ptr(),
+                                     overflow.data_ptr(), np.int32(pairs)))
+                # A separate launch makes overflow visible to every block.
+                clear((256,), (256,), (grad_weight.data_ptr(), overflow.data_ptr(), np.int32(pairs)))
+                _, recover, _, _, _ = _kernels(active, grad.shape[1], fallback=True)
+                recovery_args = (*backward_args[:8], grad_weight.data_ptr(), *backward_args[9:])
+                recover((tiles, grad.shape[1] // (2 * threads)), (threads,), recovery_args)
+
+
+@cache
+def _conversion_kernels():
+    code = r"""
+#include <cuda_fp16.h>
+extern "C" __global__ void unpack_scaled_gradient(const __half2* x, float2* y, int* overflow, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float2 f = __half22float2(x[i]);
+        if (!isfinite(f.x) || !isfinite(f.y)) atomicExch(overflow, 1);
+        f.x *= 1.0f / 65536.0f;
+        f.y *= 1.0f / 65536.0f;
+        y[i] = f;
+    }
+}
+extern "C" __global__ void clear_overflow_gradient(float2* y, const int* overflow, int n) {
+    if (!*overflow) return;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    for (; i < n; i += blockDim.x * gridDim.x) y[i] = make_float2(0.0f, 0.0f);
+}
+"""
+    return cp.RawKernel(code, "unpack_scaled_gradient"), cp.RawKernel(code, "clear_overflow_gradient")
