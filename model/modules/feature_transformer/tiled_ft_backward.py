@@ -177,7 +177,13 @@ def _get_kernel(key, src, name, dynamic_shared: int = 0, options: tuple = ()):
             k = cp.RawKernel(src, name, options=options)
             k.compile()
             if dynamic_shared > 48 * 1024:
-                k.max_dynamic_shared_size_bytes = dynamic_shared
+                # raise the kernel's dynamic shared memory ceiling to the device's
+                # opt-in maximum: the launch only allocates what it demands, so the
+                # highest valid ceiling is free and removes the sensitivity of the
+                # cap bookkeeping to the environment (a launch above the ceiling
+                # fails with CUDA_ERROR_INVALID_VALUE, as observed on another host).
+                optin = torch.cuda.get_device_properties(0).shared_memory_per_block_optin
+                k.max_dynamic_shared_size_bytes = max(dynamic_shared, optin)
             _kernels[key] = k
         return _ProbedKernel(key, k)
 
