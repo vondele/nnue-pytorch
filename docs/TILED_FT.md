@@ -118,3 +118,39 @@ Exactness: the forward (FT output, PSQT columns, fused activation quantization, 
 output on real batches) is bit-identical to tiled-ft-3. The backward's per-tile sums are unchanged;
 weight gradients differ from tiled-ft-3 by no more than tiled-ft-3 differs from itself between runs
 (atomic order, ~9e-7 relative).
+
+## tiled-ft-5
+
+Same setup as tiled-ft-4 (RTX 3090 at 1500 MHz, real `train.py` + torch.compile, B = 65536, 16 loader
+workers, 3 epochs x 400 steps, last epoch's it/s, arms interleaved): tiled-ft-4 27.85-27.96 it/s (8 runs);
+tiled-ft-5 29.83-29.95 it/s (7 runs, plus one outlier at 29.02), 1.07x. With `NNUE_L1_DENSE_FORWARD=0` (the old L1 forward) tiled-ft-5
+gives 29.07.
+
+- **Tiled scatter**: the entry walk issues the shared-memory loads of 8 entries before their adds and
+  fetches the next 32 keys one batch ahead. Same entry order, per-row sums and flushes; 8.3 -> 7.7 ms
+  in isolation on a real batch (random output gradients). Single-tile batches (where the result is
+  deterministic) give bit-identical L1-column gradients to tiled-ft-4.
+- **Grouped L1 forward** (`grouped_linear._bucketed_forward`): a per-bucket fp32 (IEEE) Triton matmul
+  over the routed rows replaces the NNZ-compacted kernel, whose summation order depended on
+  shared-memory atomics (so it was not deterministic). Each output is the sum of 16-wide dot chunks
+  in order (an identity `mov` keeps Triton from fusing them into one 1024-long chain), then the bias.
+  1.79 -> 0.72 ms in isolation (K = 1024, N = 32, 32 buckets, 60% zero activations). Against fp64:
+  old 2.8e-7, new 3.4e-7 max relative error; new vs old 3.8e-7 = old vs old (run to run) 3.8e-7.
+  `NNUE_L1_DENSE_FORWARD=0` restores the old kernel.
+- **Grouped L1 input gradient**: 128-row tiles instead of 64 (0.69 -> 0.55 ms); bit-identical (the
+  reduction is the same 32-long dot per output).
+- **FT weight merge** (`merge_quant4`): float4 accesses, and each thread walks the 32 buckets of one
+  virtual-weight element so the virtual weight is read once. 1.73 -> 1.39 ms (~830 GB/s, DRAM
+  bound); bit-identical to the scalar kernel and to the torch chain (`test_merge_quant_vectorized_bit_identical`).
+
+Per step after these changes (nsys, ms): pull gather 7.4, tiled scatter 6.7, fused optimizer 6.3
+(~840 GB/s, DRAM bound), prologue 1.65, weight merge 1.47, L1 input gradient ~1.0, epilogue 0.97,
+L1 forward 0.84, gradient norm 0.76, layer-stack GEMMs (TF32) ~1.6.
+
+Tried without gain: scatter blocks walking several column slices with the next slice prefetched into
+registers (spills at 32 warps, slower at 16), warp-batched scatter tile loads (7.71 -> 7.69 ms), 192-list
+tiles with 128-column slices, slice-fastest grid; a 4-way unrolled pull loop (slower), pull R = 16/64,
+NS = 3, LPW = 2/8; a float4 optimizer kernel (+0.7%, and not bit-identical). Writing the merged weight
+from the optimizer was not done: the FT weights can also be changed through `.data` (input weight
+clipping, the optimizer's lookahead path, checkpoint loading), which does not bump the version counter,
+so a merge cached by the optimizer could go stale silently.
