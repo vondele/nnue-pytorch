@@ -25,15 +25,12 @@ USE_TILED_FORWARD = _tf._HAS_CUPY and _tf.TILED_FORWARD_ENABLED
 USE_TILED_BACKWARD = _tb._HAS_CUPY and _tb.TILED_BACKWARD_ENABLED
 
 _EPILOGUE_SRC = r"""
-extern "C" __global__ void tiled_ft_epilogue(
+__device__ __forceinline__ void epi_elem(const int b, const int i,
     const float* __restrict__ us, const float* __restrict__ them,
     const float* __restrict__ acc_w, const float* __restrict__ acc_b, const float max_act,
-    float* __restrict__ l0_out, float* __restrict__ clamped_out, const int batch_size,
+    float* __restrict__ l0_out, float* __restrict__ clamped_out,
     const int act_q, const float act_s, const float act_eps, const float act_inv, const float act_c)
 {
-    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= (long long)batch_size * $H) return;
-    const int b = (int)(t / $H), i = (int)(t % $H);
     const float u = us[b], th = them[b];
     const size_t r = (size_t)b * $L1;
     const float w0 = acc_w[r + i], w1 = acc_w[r + i + $H], b0 = acc_b[r + i], b1 = acc_b[r + i + $H];
@@ -58,6 +55,35 @@ extern "C" __global__ void tiled_ft_epilogue(
     clamped_out[c + 1 * $H + i] = l0_w1;
     clamped_out[c + 2 * $H + i] = l0_b0;
     clamped_out[c + 3 * $H + i] = l0_b1;
+}
+
+extern "C" __global__ void tiled_ft_epilogue(
+    const float* __restrict__ us, const float* __restrict__ them,
+    const float* __restrict__ acc_w, const float* __restrict__ acc_b, const float max_act,
+    float* __restrict__ l0_out, float* __restrict__ clamped_out, const int batch_size,
+    const int act_q, const float act_s, const float act_eps, const float act_inv, const float act_c)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long long)batch_size * $H) return;
+    epi_elem((int)(t / $H), (int)(t % $H), us, them, acc_w, acc_b, max_act, l0_out, clamped_out, act_q, act_s, act_eps,
+             act_inv, act_c);
+}
+
+// After the gather's fused epilogue: one warp per position recomputes l0_ with the reference epilogue
+// where the gather's shortcut may differ (marked positions, us / them not (1, 0) or (0, 1)).
+extern "C" __global__ void tiled_ft_fixup(
+    const float* __restrict__ us, const float* __restrict__ them,
+    const float* __restrict__ acc_w, const float* __restrict__ acc_b, const float max_act,
+    float* __restrict__ l0_out, const unsigned char* __restrict__ mark, const int batch_size,
+    const int act_q, const float act_s, const float act_eps, const float act_inv, const float act_c)
+{
+    const long long w = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    if (w >= batch_size) return;
+    const int b = (int)w;
+    const float u = us[b], th = them[b];
+    if (!mark[b] && ((u == 1.0f && th == 0.0f) || (u == 0.0f && th == 1.0f))) return;
+    for (int i = threadIdx.x & 31; i < $H; i += 32)
+        epi_elem(b, i, us, them, acc_w, acc_b, max_act, l0_out, nullptr, act_q, act_s, act_eps, act_inv, act_c);
 }
 """
 
@@ -88,14 +114,11 @@ extern "C" __global__ void tiled_ft_prologue(
 
 
 _PROLOGUE_ACC_SRC = r"""
-extern "C" __global__ void tiled_ft_prologue_acc(
+__device__ __forceinline__ void pro_elem(const int b, const int i,
     const float* __restrict__ us, const float* __restrict__ them,
     const float* __restrict__ grad_l0, const float* __restrict__ acc_w, const float* __restrict__ acc_b,
-    const float max_act, float* __restrict__ grad_w, float* __restrict__ grad_b, const int batch_size)
+    const float max_act, float* __restrict__ grad_w, float* __restrict__ grad_b)
 {
-    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= (long long)batch_size * $H) return;
-    const int b = (int)(t / $H), i = (int)(t % $H);
     const float u = us[b], th = them[b];
     const size_t r = (size_t)b * $L1;
     // Recompute the clamped values exactly as tiled_ft_epilogue does (same expressions, same roundings).
@@ -118,6 +141,46 @@ extern "C" __global__ void tiled_ft_prologue_acc(
     grad_b[r + i] = th * dw0 + u * db0;
     grad_b[r + $H + i] = th * dw1 + u * db1;
 }
+
+extern "C" __global__ void tiled_ft_prologue_acc(
+    const float* __restrict__ us, const float* __restrict__ them,
+    const float* __restrict__ grad_l0, const float* __restrict__ acc_w, const float* __restrict__ acc_b,
+    const float max_act, float* __restrict__ grad_w, float* __restrict__ grad_b, const int batch_size)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long long)batch_size * $H) return;
+    pro_elem((int)(t / $H), (int)(t % $H), us, them, grad_l0, acc_w, acc_b, max_act, grad_w, grad_b);
+}
+
+// Fused prologue (the scatter computes the accumulator gradients): per list in tile order, its id, the
+// half of grad_l0 it reads (white: 0 when us == 1) and whether its position needs the reference rows
+// (us / them not (1, 0) or (0, 1)); one warp per such position writes them with the reference formulas.
+extern "C" __global__ void tiled_ft_pro_codes(const int* __restrict__ order, const float* __restrict__ us,
+    const float* __restrict__ them, unsigned* __restrict__ code, const int n_lists, const int batch_size)
+{
+    const int li = blockIdx.x * blockDim.x + threadIdx.x;
+    if (li >= n_lists) return;
+    const int lid = order[li];
+    const bool white = lid < batch_size;
+    const int b = white ? lid : lid - batch_size;
+    const float u = us[b], th = them[b];
+    const bool binary = (u == 1.0f && th == 0.0f) || (u == 0.0f && th == 1.0f);
+    code[li] = (unsigned)lid | ((white == (u == 1.0f)) ? 0u : (1u << 30)) | (binary ? 0u : (1u << 31));
+}
+
+extern "C" __global__ void tiled_ft_pro_ref(
+    const float* __restrict__ us, const float* __restrict__ them,
+    const float* __restrict__ grad_l0, const float* __restrict__ acc_w, const float* __restrict__ acc_b,
+    const float max_act, float* __restrict__ grad_w, float* __restrict__ grad_b, const int batch_size)
+{
+    const long long w = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    if (w >= batch_size) return;
+    const int b = (int)w;
+    const float u = us[b], th = them[b];
+    if ((u == 1.0f && th == 0.0f) || (u == 0.0f && th == 1.0f)) return;
+    for (int i = threadIdx.x & 31; i < $H; i += 32)
+        pro_elem(b, i, us, them, grad_l0, acc_w, acc_b, max_act, grad_w, grad_b);
+}
 """
 
 
@@ -131,6 +194,8 @@ def _launch(kernel, batch_size: int, l1_size: int, args):
     kernel(grid=((n + 255) // 256,), block=(256,), args=args)
 
 
+import os
+PRO_FUSED = os.environ.get("NNUE_TILED_PRO", "1") != "0"   # the scatter computes the accumulator gradients
 ACT_FUSED = True   # the epilogue applies act_quant (FusedDoubleFtFunction checks this)
 
 
@@ -148,6 +213,22 @@ def forward(us, them, white_indices, black_indices, weight, bias, max_ft_activat
         _tf.STATS["fallback"] += 1
         return None
     batch_size = white_indices.shape[0]
+    aq = ((np.int32(1), np.float32(act_quant[0]), np.float32(act_quant[1]), np.float32(1.0) / np.float32(act_quant[0]),
+           np.float32(act_quant[2])) if act_quant is not None else
+          (np.int32(0), np.float32(0), np.float32(0), np.float32(0), np.float32(0)))
+    if keep_acc and isinstance(prep, _tf._tp.PullPrep) and _tf._tp.epi_applicable(l1_size) and us.is_contiguous() \
+            and them.is_contiguous() and us.dtype == torch.float32 and them.dtype == torch.float32 \
+            and us.numel() == batch_size and them.numel() == batch_size:
+        # the gather writes l0_ itself; the fixup recomputes the positions its shortcut does not cover
+        l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
+        mark = torch.zeros(batch_size, dtype=torch.uint8, device=us.device)
+        acc_w, acc_b = _tf.tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep,
+                                         epi=(us, them, l0_, mark, np.float32(max_ft_activation), *aq))
+        with _tb._cupy_stream(us.device):
+            _kernel("tiled_ft_fixup", _EPILOGUE_SRC, l1_size)(grid=((batch_size * 32 + 255) // 256,), block=(256,), args=(
+                us.data_ptr(), them.data_ptr(), acc_w.data_ptr(), acc_b.data_ptr(), np.float32(max_ft_activation),
+                l0_.data_ptr(), mark.data_ptr(), np.int32(batch_size), *aq))
+        return l0_, (acc_w, acc_b)
     acc_w, acc_b = _tf.tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep)
     l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
     clamped_out = None if keep_acc else torch.empty(
@@ -180,6 +261,22 @@ def backward(us, them, white_indices, black_indices, grad_l0, clamped_out, num_i
     batch_size = white_indices.shape[0]
     grad_w = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
     grad_b = torch.empty_like(grad_w)
+    if acc is not None and PRO_FUSED and prep is not None and grad_l0.is_contiguous() and us.is_contiguous() \
+            and them.is_contiguous() and us.dtype == torch.float32 and them.dtype == torch.float32 \
+            and us.numel() == batch_size and them.numel() == batch_size and acc[0].shape[1] == l1_size \
+            and _tb.DEFAULT_SLICE == 64 and l1_size % 64 == 0 and 2 * batch_size < (1 << 30):
+        # fused prologue: the scatter computes the accumulator gradients; grad_w / grad_b only receive the
+        # reference rows of positions with non-binary us / them
+        n_lists = 2 * batch_size
+        code = torch.empty(n_lists, dtype=torch.int32, device=us.device)
+        with _tb._cupy_stream(us.device):
+            _kernel("tiled_ft_pro_codes", _PROLOGUE_ACC_SRC, l1_size)(grid=((n_lists + 255) // 256,), block=(256,), args=(
+                prep.order.data_ptr(), us.data_ptr(), them.data_ptr(), code.data_ptr(), np.int32(n_lists), np.int32(batch_size)))
+            _kernel("tiled_ft_pro_ref", _PROLOGUE_ACC_SRC, l1_size)(grid=((batch_size * 32 + 255) // 256,), block=(256,), args=(
+                us.data_ptr(), them.data_ptr(), grad_l0.data_ptr(), acc[0].data_ptr(), acc[1].data_ptr(),
+                np.float32(max_ft_activation), grad_w.data_ptr(), grad_b.data_ptr(), np.int32(batch_size)))
+        return _tb.tiled_backward(white_indices, black_indices, grad_w, grad_b, num_inputs, l1_size, prep=prep,
+                                  pro=(grad_l0, acc[0], acc[1], code, max_ft_activation))
     with _tb._cupy_stream(us.device):
         if acc is not None:
             _launch(_kernel("tiled_ft_prologue_acc", _PROLOGUE_ACC_SRC, l1_size), batch_size, l1_size, (
