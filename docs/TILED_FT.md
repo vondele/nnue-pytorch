@@ -193,3 +193,53 @@ call `invalidate()`). It was bit-identical (118 of 118 reused merges equal to a 
 training) and removed the 1.44 ms merge kernel, but measured 31.34-31.39 it/s against 31.44-31.45
 without it (the pull gather took ~1 ms longer in the profile, and the loop now waits on batches), so it
 was not kept.
+
+## tiled-ft-7
+
+Same setup (RTX 3090 at 1500 MHz, real `train.py` + torch.compile, B = 65536, 16 loader workers,
+3 epochs x 400 steps, last epoch's it/s, arms interleaved): tiled-ft-6 31.19-31.49 it/s; + pull items
+32.75-32.79; + live rows 33.11-33.13; + batched scatter loads 33.87-33.90; + broadcast scatter keys
+34.58-34.60 (7 of 8 runs; one at 33.37). Interleaved with tiled-ft-6 at 31.46-31.49: 1.10x.
+
+- **Pull gather items** (`tiled_ft_pull.py`): `pull_lists` also writes, per (chunk, warp), the distinct
+  staged rows the warp's lists use (ascending), each with the mask of the lists that use it. The gather
+  loads such a row from shared memory once and adds it to every list in the mask (4 items' loads in
+  flight), with no per-chunk prefix scan or count shuffles. 8 lists per warp, 8 warps, register cap for
+  3 blocks per SM. Each list still adds its rows in ascending order: bit-identical (torch.equal on 3 real
+  batches). Isolated: 6.97 -> 5.52 ms; the pull preparation (loader stream) 1.16 -> 1.36 ms.
+- **Live rows** (`ranger_lite.py`): a byte per FT row, computed from the optimizer state when the state
+  tensors are new or changed in place and then kept by the update kernel, marks rows whose state may be
+  nonzero. An unmarked row that is also unflagged would take the dormant skip in every element, so the
+  kernel skips it without reading its state (~25% of the FT rows are never touched). Bit-identical
+  (`test_live_rows_bit_identical`: in-place state edits including -0.0, a non-finite gradient scale,
+  lookahead steps). `NNUE_LIVE_ROWS=0` disables.
+- **Scatter tile load**: every thread issues all its list-id loads, then all its gradient loads, before
+  its shared-memory stores (it was one dependent load chain per element). Isolated 6.75 -> 6.08 ms.
+- **Scatter keys**: each warp stores its 32 prefetched keys in a 128-byte shared buffer and reads them
+  back as broadcasts instead of one shuffle per entry. Isolated 6.08 -> 5.48 ms.
+  Both scatter changes keep the shared-memory contents, the walk, the flushes and the per-tile sums;
+  only the order of the atomics across tiles varies, as before. Against an fp64 reference (real batch,
+  random output gradients): weight gradient 5.5-6.5e-7, bias 5.0-5.7e-7 of the maximum, against
+  5.6-5.8e-7 and 4.8-5.6e-7 for tiled-ft-6.
+
+Per step after these changes (nsys, ms): pull gather 6.2, tiled scatter 6.05, fused optimizer 5.0,
+cutlass TF32 GEMMs 1.7, prologue 1.6, weight merge 1.46, epilogue 1.1, torch elementwise 1.1, L1 input
+gradient 0.93, L1 forward 0.75, L1 weight gradient 0.62, l2 bias sum 0.5, flagged norm 0.36, inductor
+new_zeros 0.34; loader stream: tile sort 1.0, pull lists 0.92, merge runs 0.6, order key 0.5. Main
+stream 98.4% busy. The gather and the scatter run 0.6-0.7 ms slower in training than in isolation
+(the loader stream's preparation kernels share the SMs).
+
+Tried without gain:
+- Gather: masks built in the kernel with `__reduce_or_sync` (7.3 ms, no prep change); 16 lists per
+  warp (7.0 ms); 2 or 4 lists per warp; NS = 3; float2 columns; items read as shared-memory broadcasts
+  (6.1 ms: the extra 512 B per block drops the gather to 2 blocks per SM).
+- Scatter: persistent blocks that prefetch the next (tile, slice) into registers (7.3 ms, register
+  cap at 1024 threads); 8-entry batches changed to 4 or 16; tiles of 128 lists with 16 warps
+  (+0.8% it/s, but the weight and bias gradient errors against fp64 grow 1.6-2x, 0.84-1.2e-6 and
+  9.2e-7, from the extra atomics: rejected).
+- Zero-filling the FT weight gradient on a side stream during the forward: 32.92-32.96 it/s against
+  33.11-33.12 (it competes with the forward kernels).
+- The bucket selection's backward as one `where` instead of new_zeros + index_put (bit-identical
+  under torch.compile): 33.12-33.13 against 33.11-33.12.
+- The prefetch stream at normal instead of high priority: 34.91, 34.94, then 32.28 and 28.42 it/s (the
+  preparation then sometimes falls behind the step), so it stays at high priority.
