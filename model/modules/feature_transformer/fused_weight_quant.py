@@ -21,6 +21,8 @@ import os
 import numpy as np
 import torch
 
+from model.optimizers import grad_row_flags as _grf
+
 try:
     import cupy as cp
 
@@ -149,6 +151,7 @@ class _MergeFakeQuant(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad):
+        flags = _grf.lookup(grad)   # rows of the tiled FT gradient that are not exactly +0
         grad = grad.contiguous()
         grads = [None] * len(ctx.shapes)
         r0 = 0
@@ -156,6 +159,8 @@ class _MergeFakeQuant(torch.autograd.Function):
             nr = ctx.shapes[i][0]
             g = grad[r0:r0 + nr]
             grads[i] = g
+            if flags is not None:
+                _grf.register(g, flags[r0:r0 + nr])
             if has_v:
                 vs = ctx.shapes[i + 1]
                 grads[i + 1] = g.view(nb, vs[0], *vs[1:]).sum(0)

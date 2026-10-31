@@ -262,7 +262,8 @@ _SCATTER_SRC = _HDR + r"""
 extern "C" __global__ void tiled_scatter(
     const float* __restrict__ Gw, const float* __restrict__ Gb, const int32_t* __restrict__ order, const int32_t* __restrict__ tile_map,
     const int32_t* __restrict__ tile_start, const uint32_t* __restrict__ e_key,
-    float* __restrict__ grad_weight, float* __restrict__ grad_bias, const int32_t n_lists, const int32_t batch_size)
+    float* __restrict__ grad_weight, float* __restrict__ grad_bias, const int32_t n_lists, const int32_t batch_size,
+    uint8_t* __restrict__ row_touched)
 {
     const int32_t T = @T@, SLICE = @SLICE@, OUT = @OUT@, CPL = @CPL@, LOCAL_BITS = @LOCAL_BITS@;
     extern __shared__ float Gsh[];                          // T * SLICE
@@ -324,6 +325,7 @@ extern "C" __global__ void tiled_scatter(
                 const uint32_t r = key[u] >> LOCAL_BITS;
                 if (r != cur) {
                     if (cur != 0xFFFFFFFFu) {
+                        if (lane == 0 && slice == 0) row_touched[cur] = 1;
                         float* gw = grad_weight + (int64_t)cur * OUT + col0 + lane;
 #pragma unroll
                         for (int c = 0; c < CPL; ++c) { atomicAdd(gw + 32 * c, acc[c]); acc[c] = 0.0f; }
@@ -341,6 +343,7 @@ extern "C" __global__ void tiled_scatter(
             const int l = (int)(key & ((1u << LOCAL_BITS) - 1));
             if (r != cur) {
                 if (cur != 0xFFFFFFFFu) {
+                    if (lane == 0 && slice == 0) row_touched[cur] = 1;
                     float* gw = grad_weight + (int64_t)cur * OUT + col0 + lane;
 #pragma unroll
                     for (int c = 0; c < CPL; ++c) { atomicAdd(gw + 32 * c, acc[c]); acc[c] = 0.0f; }
@@ -354,12 +357,16 @@ extern "C" __global__ void tiled_scatter(
         }
     }
     if (cur != 0xFFFFFFFFu) {
+        if (lane == 0 && slice == 0) row_touched[cur] = 1;
         float* gw = grad_weight + (int64_t)cur * OUT + col0 + lane;
 #pragma unroll
         for (int c = 0; c < CPL; ++c) atomicAdd(gw + 32 * c, acc[c]);
     }
 }
 """
+
+
+from model.optimizers import grad_row_flags as _grf  # noqa: E402
 
 
 def _scatter_kernel(T: int, slice_cols: int, l1_size: int, out_size: int, slice_fastest: bool, nwarps: int):
@@ -383,7 +390,7 @@ _PSQT_SRC = _HDR + r"""
 extern "C" __global__ void psqt_scatter(
     const int32_t* __restrict__ white, const int32_t* __restrict__ black,
     const float* __restrict__ Gw, const float* __restrict__ Gb, float* __restrict__ grad_weight,
-    const int32_t n_lists, const int32_t batch_size)
+    const int32_t n_lists, const int32_t batch_size, uint8_t* __restrict__ row_touched)
 {
     const int32_t MAXA = @MAXA@, L1 = @L1@, OUT = @OUT@;
     const int64_t gid = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -393,7 +400,7 @@ extern "C" __global__ void psqt_scatter(
     if (r < 0) return;
     const float* g = (li < batch_size ? Gw + (int64_t)li * OUT : Gb + (int64_t)(li - batch_size) * OUT) + L1;
     float* gw = grad_weight + (int64_t)r * OUT + L1;
-    for (int p = 0; p < OUT - L1; ++p) { const float v = g[p]; if (v != 0.0f) atomicAdd(gw + p, v); }
+    for (int p = 0; p < OUT - L1; ++p) { const float v = g[p]; if (v != 0.0f) { row_touched[r] = 1; atomicAdd(gw + p, v); } }
 }
 """
 
@@ -628,6 +635,9 @@ def tiled_backward(white_indices, black_indices, grad_w, grad_b, num_inputs, l1_
 
     grad_weight = torch.zeros(num_inputs, OUT, dtype=torch.float32, device=dev)
     grad_bias = torch.zeros(OUT, dtype=torch.float32, device=dev)
+    # row_touched[r] != 0 for every row the kernels below add to; the other rows of grad_weight stay
+    # exactly +0 (registered for the optimizer, see grad_row_flags)
+    row_touched = torch.zeros(num_inputs, dtype=torch.uint8, device=dev)
     if OUT > l1_size:
         grad_bias[l1_size:] = grad_w[:, l1_size:].sum(0) + grad_b[:, l1_size:].sum(0)
     _mark(timers, "alloc", dev)
@@ -639,11 +649,12 @@ def tiled_backward(white_indices, black_indices, grad_w, grad_b, num_inputs, l1_
             grid=launch_grid, block=(32 * nwarps,), shared_mem=prep.T * slice_cols * 4, args=(
                 grad_w.data_ptr(), grad_b.data_ptr(), prep.order.data_ptr(), prep.tile_map.data_ptr(),
                 prep.tile_start.data_ptr(), prep.e_key.data_ptr(), grad_weight.data_ptr(), grad_bias.data_ptr(),
-                np.int32(n_lists), np.int32(B)))
+                np.int32(n_lists), np.int32(B), row_touched.data_ptr()))
         _mark(timers, "scatter", dev)
         if OUT > l1_size:
             _psqt_scatter_kernel(maxa, l1_size, OUT)(grid=((n_lists * maxa + 255) // 256,), block=(256,), args=(
                 white_indices.data_ptr(), black_indices.data_ptr(), grad_w.data_ptr(), grad_b.data_ptr(),
-                grad_weight.data_ptr(), np.int32(n_lists), np.int32(B)))
+                grad_weight.data_ptr(), np.int32(n_lists), np.int32(B), row_touched.data_ptr()))
         _mark(timers, "psqt", dev)
+    _grf.register(grad_weight, row_touched, reset=True)
     return grad_weight, grad_bias

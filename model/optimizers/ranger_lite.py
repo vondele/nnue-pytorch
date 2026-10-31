@@ -8,9 +8,12 @@
 
 import collections
 import math
+import os
 import warnings
 
 import torch
+
+from . import grad_row_flags as _grf
 
 try:
     import cupy as cp
@@ -21,6 +24,20 @@ except Exception:  # noqa: BLE001
     cp = None
     np = None
     _HAS_CUPY = False
+
+
+# Fold the lookahead blend into the fused update kernels (NNUE_FUSE_LOOKAHEAD=0 disables).
+_FUSE_LOOKAHEAD = os.environ.get("NNUE_FUSE_LOOKAHEAD", "1") != "0"
+# Use the FT gradient's row flags (grad_row_flags) in the fused update (NNUE_GRAD_ROW_FLAGS=0 disables).
+_ROW_FLAGS = os.environ.get("NNUE_GRAD_ROW_FLAGS", "1") != "0"
+
+
+def _identity_scalars(lr_div_bc1, eps, bias_correction2, a, b, c):
+    """Whether, with these fp32 scalars, an element with g == 0 and all-zero state keeps its exact
+    parameter and state bits (+0 products and sums, p - (+0) == p): all finite, lr >= 0, eps > 0,
+    bias correction > 0, the momentum factors a, b >= 0 and the divisor c > 0."""
+    v = [float(np.float32(x)) for x in (lr_div_bc1, eps, bias_correction2, a, b, c)]
+    return all(math.isfinite(x) for x in v) and v[0] >= 0 and v[1] > 0 and v[2] > 0 and v[3] >= 0 and v[4] >= 0 and v[5] > 0
 
 
 class _RangerLiteFusedKernels:
@@ -62,16 +79,27 @@ extern "C" __global__ void ranger_lite_update_pnm(
     float lr_div_bc1,
     float eps,
     int64_t step,
-    float wd_factor
+    float wd_factor,
+    float* __restrict__ la_params,
+    float la_alpha,
+    float la_beta,
+    const unsigned char* __restrict__ row_flags,
+    int row_shift,
+    int dormant_skip
 ) {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
-        float g = grad_scale == nullptr ? grad[i] : __fmul_rn(grad[i], *grad_scale);
-        float vm = variance_ma[i] * beta2 + g * g * one_minus_beta2;
+        // rows without a flag hold exactly +0 (grad_row_flags), so their gradient is not read
+        float g = (row_flags == nullptr || row_flags[i >> row_shift]) ? grad[i] : 0.0f;
+        if (grad_scale != nullptr) g = __fmul_rn(g, *grad_scale);
+        const float vm_old = variance_ma[i];
+        const float gm = grad_ma[i];
+        const float ngm = neg_grad_ma[i];
+        // g == 0 and all-zero state: the update below rewrites the same values (host checks the scalars)
+        if (dormant_skip && g == 0.0f && (__float_as_uint(vm_old) | __float_as_uint(gm) | __float_as_uint(ngm)) == 0u) continue;
+        float vm = vm_old * beta2 + g * g * one_minus_beta2;
         variance_ma[i] = vm;
         float denom = sqrtf(vm / bias_correction2) + eps;
 
-        float gm = grad_ma[i];
-        float ngm = neg_grad_ma[i];
         float pgm = (step & 1LL) ? gm : ngm;
         float pngm = (step & 1LL) ? ngm : gm;
 
@@ -82,6 +110,11 @@ extern "C" __global__ void ranger_lite_update_pnm(
             new_p = new_p * (1.0f - wd_factor);
         }
         new_p = new_p - lr_div_bc1 * (pnm_val / denom);
+        if (la_params != nullptr) {
+            // this step's lookahead blend: p.mul_(alpha).add_(la, alpha=1 - alpha); la.copy_(p)
+            new_p = __fmaf_rn(la_beta, la_params[i], __fmul_rn(new_p, la_alpha));   // add_ contracts to an FMA
+            la_params[i] = new_p;
+        }
         p[i] = new_p;
 
         if (step & 1LL) {
@@ -106,15 +139,27 @@ extern "C" __global__ void ranger_lite_update_adam(
     float one_minus_beta1,
     float lr_div_bc1,
     float eps,
-    float wd_factor
+    float wd_factor,
+    float* __restrict__ la_params,
+    float la_alpha,
+    float la_beta,
+    const unsigned char* __restrict__ row_flags,
+    int row_shift,
+    int dormant_skip
 ) {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
-        float g = grad_scale == nullptr ? grad[i] : __fmul_rn(grad[i], *grad_scale);
-        float vm = variance_ma[i] * beta2 + g * g * one_minus_beta2;
+        // rows without a flag hold exactly +0 (grad_row_flags), so their gradient is not read
+        float g = (row_flags == nullptr || row_flags[i >> row_shift]) ? grad[i] : 0.0f;
+        if (grad_scale != nullptr) g = __fmul_rn(g, *grad_scale);
+        const float vm_old = variance_ma[i];
+        const float gm_old = grad_ma[i];
+        // g == 0 and all-zero state: the update below rewrites the same values (host checks the scalars)
+        if (dormant_skip && g == 0.0f && (__float_as_uint(vm_old) | __float_as_uint(gm_old)) == 0u) continue;
+        float vm = vm_old * beta2 + g * g * one_minus_beta2;
         variance_ma[i] = vm;
         float denom = sqrtf(vm / bias_correction2) + eps;
 
-        float gm = grad_ma[i] * beta1 + g * one_minus_beta1;
+        float gm = gm_old * beta1 + g * one_minus_beta1;
         grad_ma[i] = gm;
 
         float new_p = p[i];
@@ -122,6 +167,11 @@ extern "C" __global__ void ranger_lite_update_adam(
             new_p = new_p * (1.0f - wd_factor);
         }
         new_p = new_p - lr_div_bc1 * (gm / denom);
+        if (la_params != nullptr) {
+            // this step's lookahead blend: p.mul_(alpha).add_(la, alpha=1 - alpha); la.copy_(p)
+            new_p = __fmaf_rn(la_beta, la_params[i], __fmul_rn(new_p, la_alpha));   // add_ contracts to an FMA
+            la_params[i] = new_p;
+        }
         p[i] = new_p;
     }
 }
@@ -342,8 +392,10 @@ class RangerLite(torch.optim.Optimizer):
                 return False
         return True
 
-    def _fused_update_group(self, group, grad_scale=None):
-        """Apply the fused full update kernel (variance + moment + param)."""
+    def _fused_update_group(self, group, grad_scale=None, lookahead_merge=False):
+        """Apply the fused full update kernel (variance + moment + param). With ``lookahead_merge``
+        the kernel also applies this step's lookahead blend (``lookahead_process_step``) to the new
+        parameter value, so the parameters and lookahead copies are not passed over again."""
         _RangerLiteFusedKernels._compile()
         beta1, beta2 = group["betas"]
         lr = group["lr"]
@@ -358,6 +410,8 @@ class RangerLite(torch.optim.Optimizer):
 
         wd_factor = decay * lr if not self.use_stable_weight_decay else 0.0
         scale_ptr = np.uint64(grad_scale.data_ptr() if grad_scale is not None else 0)
+        la_alpha = np.float32(self.lookahead_alpha)
+        la_beta = np.float32(1.0 - self.lookahead_alpha)
 
         for p in group["params"]:
             if p.grad is None:
@@ -375,6 +429,14 @@ class RangerLite(torch.optim.Optimizer):
             gm_arr = cp.from_dlpack(torch.to_dlpack(state["grad_ma"]))
             vm_arr = cp.from_dlpack(torch.to_dlpack(state["variance_ma"]))
 
+            la_ptr = np.uint64(state["lookahead_params"].data_ptr() if lookahead_merge else 0)
+            rf = _grf.lookup(grad) if _ROW_FLAGS else None
+            if rf is not None:
+                cols = grad.shape[1]
+                if cols & (cols - 1) or not grad.is_contiguous() or p.numel() != grad.numel():
+                    rf = None  # the row length must be a power of two
+            rf_ptr = np.uint64(rf.data_ptr() if rf is not None else 0)
+            rf_shift = np.int32(grad.shape[1].bit_length() - 1 if rf is not None else 0)
             block = 512
             grid = (p.numel() + block - 1) // block
 
@@ -383,6 +445,8 @@ class RangerLite(torch.optim.Optimizer):
                 bias_correction1 = 1.0 - beta1**effective_step
                 lr_div_bc1 = lr / bias_correction1
                 ngm_arr = cp.from_dlpack(torch.to_dlpack(state["neg_grad_ma"]))
+                dormant = rf is not None and not lookahead_merge and wd_factor == 0.0 and _identity_scalars(
+                    lr_div_bc1, eps, bias_correction2, one_plus_pnm, pnm_factor, noise_norm)
                 args = (
                     p_arr,
                     g_arr,
@@ -403,6 +467,12 @@ class RangerLite(torch.optim.Optimizer):
                     np.float32(eps),
                     np.int64(step),
                     np.float32(wd_factor),
+                    la_ptr,
+                    la_alpha,
+                    la_beta,
+                    rf_ptr,
+                    rf_shift,
+                    np.int32(1 if dormant else 0),
                 )
                 _RangerLiteFusedKernels._pnm_kernel(
                     grid=(grid,), block=(block,), args=args
@@ -410,6 +480,8 @@ class RangerLite(torch.optim.Optimizer):
             else:
                 bias_correction1 = 1.0 - beta1**step
                 lr_div_bc1 = lr / bias_correction1
+                dormant = rf is not None and not lookahead_merge and wd_factor == 0.0 and _identity_scalars(
+                    lr_div_bc1, eps, bias_correction2, beta1, 1.0, 1.0)
                 args = (
                     p_arr,
                     g_arr,
@@ -425,6 +497,12 @@ class RangerLite(torch.optim.Optimizer):
                     np.float32(lr_div_bc1),
                     np.float32(eps),
                     np.float32(wd_factor),
+                    la_ptr,
+                    la_alpha,
+                    la_beta,
+                    rf_ptr,
+                    rf_shift,
+                    np.int32(1 if dormant else 0),
                 )
                 _RangerLiteFusedKernels._adam_kernel(
                     grid=(grid,), block=(block,), args=args
@@ -579,9 +657,19 @@ class RangerLite(torch.optim.Optimizer):
         if not needs_variance_sum:
             all_fusable = all(self._can_fuse_group_full(g) for g in self.param_groups)
             if all_fusable:
+                # On a lookahead merge step the blend runs inside the update kernels (same fp32
+                # roundings as lookahead_process_step).
+                la_merge = (
+                    self.lookahead_active
+                    and _FUSE_LOOKAHEAD
+                    and self.lookahead_step + 1 >= self.lookahead_mergetime
+                )
                 for group in self.param_groups:
-                    self._fused_update_group(group, grad_scale)
-                if self.lookahead_active:
+                    self._fused_update_group(group, grad_scale, la_merge)
+                _grf.clear()
+                if la_merge:
+                    self.lookahead_step = 0
+                elif self.lookahead_active:
                     self.lookahead_process_step()
                 return loss
 
