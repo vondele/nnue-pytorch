@@ -243,3 +243,59 @@ Tried without gain:
   under torch.compile): 33.12-33.13 against 33.11-33.12.
 - The prefetch stream at normal instead of high priority: 34.91, 34.94, then 32.28 and 28.42 it/s (the
   preparation then sometimes falls behind the step), so it stays at high priority.
+
+## tiled-ft-8
+
+Same setup (RTX 3090 at 1500 MHz, real `train.py` + torch.compile, B = 65536, 16 loader workers,
+3 epochs x 400 steps, last epoch's it/s, arms interleaved). tiled-ft-7: 34.39-34.59 it/s.
+
+| arm | it/s |
+|---|---|
+| tiled-ft-7 | 33.82-34.59 (3 of 4 runs at 34.58-34.59) |
+| loader-stream preparation only, old loader split | 35.15-35.71 (loader bound) |
+| loader builder ratio 0.5 (+ warp order key; other preparation changes off) | 34.94-34.95 |
+| + preparation | 35.99-36.78 |
+| + bucket sum | 37.03 |
+| + fused epilogue | 38.02-38.03 |
+| + fused prologue (tiled-ft-8) | 39.45-39.52 (5 runs), 1.14x |
+
+- **The data loader was the limit.** train.py's loader alone (with the prefetch preparation, no model)
+  delivered 35.3-36 batches/s with 16 workers, of which a quarter built batches. Builders are the
+  bottleneck with this feature set (K32H3 alone: 118 batches/s, +PP_3Wide 54, +Full_Threats 35).
+  Half of the workers as builders: 47-49 batches/s (3/8: 46, 5/8: 48). Same batches; only the thread
+  split changes (`NNUE_LOADER_BUILDER_RATIO` overrides). The library has to be rebuilt.
+- **Preparation** (loader stream; exact: the gather and scatter inputs are torch.equal on 4 real
+  batches): order key with one warp per list (0.55 -> 0.10 ms isolated); sub-tile sort as a CUB
+  BlockRadixSort over the 18+6 varying key bits (bitonic ~0.8 -> 0.43 ms); merge of the 4 sorted runs
+  in shared memory (0.36 -> 0.30 ms); the pull preparation's torch glue and list kernel replaced by
+  three kernels (distinct rows per tile, a one-block prefix, a block per tile that ranks its entries in
+  shared memory and builds wstart / wn / items): pull side 1.3 -> 0.27 ms. Per batch (isolated, incl.
+  the host sync) 3.55 -> 1.52 ms; in training the loader stream went from 5.1 to 2.3 ms per step.
+  `NNUE_TILED_RSORT_BS=0`, `NNUE_TILED_MERGE_SH=0`, `NNUE_PULL_BUILD=0`, `NNUE_PULL_ITEMS=0` restore
+  the old kernels. The gather / scatter still run ~0.9 / ~1.2 ms slower while preparation kernels
+  overlap them (14 and 7 of 30 instances).
+- **Fused epilogue** (`NNUE_PULL_EPI`): with `keep_acc` the gather block takes 64 columns of each half
+  of L1, so a pairwise pair sits in lanes l and l ^ 16; for us / them = (1, 0) / (0, 1) the list writes
+  its half of `l0_` itself. Lists with a -0 or non-finite accumulator mark their position, and a warp
+  per position recomputes marked and non-binary positions with the reference epilogue. Bit-identical
+  `l0_` (int32 view) and accumulators. Epilogue 1.07 ms gone, gather +0.27 ms.
+- **Fused prologue** (`NNUE_TILED_PRO`): scatter blocks take 32 columns of each half and their tile
+  load computes the accumulator gradients from the list's own accumulators and its half of `grad_l0`
+  (the 1.6 ms prologue pass wrote 537 MB that the scatter read back). Positions with non-binary
+  us / them use reference rows written by a warp per position. Values equal the prologue's except for
+  the sign of zeros, which the sums (starting at +0) do not see; with non-finite inputs different
+  elements may become non-finite. Single tile: torch.equal. Real batches against fp64: weight
+  6.5-7.3e-7, bias 6.1-9.3e-7 of the maximum (separate prologue 6.7-7.7e-7, 6.0-10.5e-7).
+- **Bucket sum** (`NNUE_BUCKET_SUM_KERNEL`): the virtual weight's gradient sums only flagged rows, in
+  PyTorch's reduction order (bit-identical); 0.36 -> 0.20 ms.
+
+Per step after these changes (nsys, 25.5 ms of GPU time, main stream 98.8% busy, ms): tiled scatter
+6.24, pull gather 6.05, fused optimizer 4.88, cutlass TF32 GEMMs 1.69, weight merge 1.45, L1 input
+gradient 0.79, torch elementwise 0.74 (0.64 of it the FT gradient zero fill), L1 forward 0.71, L1
+weight gradient 0.60, l2 bias sum 0.46, flagged norm 0.36, inductor new_zeros 0.31, bucket sum 0.21;
+loader stream 2.26: sub-tile sort 0.46, merge 0.34, unpack 0.26, list-order radix sort 0.26, pull
+build 0.26, tile keys 0.13, order key 0.12.
+
+Tried without gain: gating the loader preparation on an event after the scatter, so it overlaps the
+DRAM-bound optimizer and merge instead of the gather / scatter (34.8 against 35.6 it/s while loader
+bound); merge runs ranked by per-thread linear advance instead of binary search (0.30 -> 0.50 ms).
