@@ -616,16 +616,23 @@ bool SparseBatch::pack_indices(int* output, std::size_t capacity) const {
     return true;
 }
 
+// Builder share of the worker budget; NNUE_LOADER_BUILDER_RATIO overrides the default.
+static double builder_thread_ratio(double fallback) {
+    const char* v = std::getenv("NNUE_LOADER_BUILDER_RATIO");
+    return v ? std::atof(v) : fallback;
+}
+
 int FeaturedBatchStream::calculate_num_reader_threads(int concurrency) {
-    if (worker_thread_ratio >= 1)
+    if (builder_thread_ratio(worker_thread_ratio) >= 1)
         return 1;
     return std::max(1, concurrency - calculate_num_worker_threads(concurrency));
 }
 
 int FeaturedBatchStream::calculate_num_worker_threads(int concurrency) {
-    if (worker_thread_ratio <= 0)
+    const double ratio = builder_thread_ratio(worker_thread_ratio);
+    if (ratio <= 0)
         return 1;
-    return std::max(1, static_cast<int>(std::floor(concurrency * worker_thread_ratio)));
+    return std::max(1, static_cast<int>(std::floor(concurrency * ratio)));
 }
 
 FeaturedBatchStream::FeaturedBatchStream(
