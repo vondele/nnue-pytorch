@@ -205,3 +205,67 @@ def test_merge_quant_vectorized_bit_identical(cols):
                                                     np.int64(ww.numel()), np.int64(1 if vv is None else vv.numel()),
                                                     np.float32(s), np.float32(1.0) / np.float32(s)))
     assert torch.equal(out, sc)
+
+
+def _fused_inputs(B, seed, L1=1024, N=4096, maxa=64):
+    dev = torch.device("cuda")
+    gen = torch.Generator(device=dev).manual_seed(seed)
+    w = _indices(B, maxa, N, gen, dev); b = _indices(B, maxa, N, gen, dev)
+    us = (torch.rand(B, 1, generator=gen, device=dev) < 0.5).float(); them = 1.0 - us
+    us[3] = 0.5; them[3] = 0.5; us[5] = 1.0; them[5] = 1.0                 # non-binary positions
+    W = (torch.randn(N, L1, generator=gen, device=dev) * 0.02 * 64).round() / 64
+    W[W == 0] = 0.0
+    W[torch.rand(N, L1, generator=gen, device=dev) < 0.3] = -0.0            # -0 weights: -0 accumulators
+    bias = (torch.randn(L1, generator=gen, device=dev) * 0.3 * 64).round() / 64
+    bias[:64] = -0.0
+    return us, them, w, b, W, bias
+
+
+@pytest.mark.parametrize("aq", [None, (127.0, 0.25, 1.0), (127.0, 0.0, 0.5)])
+def test_fused_epilogue_bit_identical(aq):
+    from model.modules.feature_transformer import tiled_ft_pull as TP
+    us, them, w, b, W, bias = _fused_inputs(2048, 3)
+    outs = []
+    old = TP.EPI_FUSED
+    try:
+        for fused in (False, True):
+            TP.EPI_FUSED = fused
+            bp = TB.register_prep(w, b)
+            TF.register_prep(w, b, order_perm=bp.order, from_backward=bp)
+            outs.append(TFF.forward(us, them, w, b, W, bias, MAX_ACT, 1024, keep_acc=True, act_quant=aq))
+    finally:
+        TP.EPI_FUSED = old
+    (l0a, (aw, ab)), (l0b, (bw, bb)) = outs
+    assert torch.equal(l0a.view(torch.int32), l0b.view(torch.int32))
+    assert torch.equal(aw, bw) and torch.equal(ab, bb)
+
+
+def test_fused_prologue_single_tile_bit_identical():
+    # one tile (2B <= 256 lists): every (row, column) gets one atomic, so the result is deterministic
+    us, them, w, b, W, bias = _fused_inputs(128, 4)
+    gen = torch.Generator(device="cuda").manual_seed(5)
+    aw = torch.randn(128, 1024, generator=gen, device="cuda") * 0.6 + 0.3
+    ab = torch.randn(128, 1024, generator=gen, device="cuda") * 0.6 + 0.3
+    aw[aw.abs() < 0.05] = -0.0
+    gl0 = torch.randn(128, 1024, generator=gen, device="cuda") * 1e-3
+    prep = TB.prepare(w, b)
+    old = TFF.PRO_FUSED
+    try:
+        res = []
+        for pro in (False, True):
+            TFF.PRO_FUSED = pro
+            res.append(TFF.backward(us, them, w, b, gl0, None, W.shape[0], MAX_ACT, 1024, prep=prep, acc=(aw, ab)))
+    finally:
+        TFF.PRO_FUSED = old
+    assert torch.equal(res[0][0], res[1][0]) and torch.equal(res[0][1], res[1][1])
+
+
+@pytest.mark.parametrize("p", [0.02, 0.6, 1.0])
+def test_bucket_sum_matches_torch(p):
+    from model.modules.feature_transformer import fused_weight_quant as FWQ
+    gen = torch.Generator(device="cuda").manual_seed(6)
+    nb, vs, cols = 32, 768, 1024
+    fl = (torch.rand(nb * vs, generator=gen, device="cuda") < p).to(torch.uint8)
+    g = torch.randn(nb * vs, cols, generator=gen, device="cuda") * fl[:, None].float()
+    g[g == 0] = 0.0
+    assert torch.equal(FWQ._bucket_sum(g, fl, nb, (vs, cols)), g.view(nb, vs, cols).sum(0))
