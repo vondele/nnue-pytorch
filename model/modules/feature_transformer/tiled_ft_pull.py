@@ -48,6 +48,7 @@ LPW = int(os.environ.get("NNUE_PULL_LPW", "8"))  # lists per warp
 NW = TL // LPW    # warps per block
 VEC = int(os.environ.get("NNUE_PULL_VEC", "4"))  # columns per lane
 SLICE = 32 * VEC  # columns per block
+ITEMS_KERNEL = os.environ.get("NNUE_PULL_ITEMS", "1") != "0"   # 0: the per-tile list kernel builds the items
 MAX_CHUNKS = 16384 // TL   # shared counters of the list kernel (max distinct rows per tile = R * MAX_CHUNKS)
 
 _HDR = "typedef int int32_t; typedef long long int64_t; typedef unsigned int uint32_t; typedef unsigned char uint8_t; typedef unsigned short uint16_t;\n"
@@ -145,6 +146,72 @@ extern "C" __global__ void pull_lists(
             }
             wn_g[g * NW + w] = (uint8_t)k;
         }
+    }
+}
+"""
+
+_ITEMS_SRC = _HDR + r"""
+// One warp per (tile, chunk) (global chunk index = warp; warps past the last chunk exit). Entries
+// arrive row-sorted (the backward's keys), so a chunk's entries (distinct-row ranks c*R .. c*R+R-1)
+// are one contiguous range, found by binary search on seg_incl. The warp ORs every entry's row bit
+// into the mask of its list and counts the entries of every warp group (shared memory), then lane w
+// writes group w's first entry (wstart), its items (row | mask of its lists using the row << 8,
+// ascending rows) and their number (wn): the same values as the per-tile counting sort did.
+extern "C" __global__ void __launch_bounds__(256) pull_items(
+    const uint32_t* __restrict__ e_key, const int32_t* __restrict__ seg_incl, const int32_t* __restrict__ tile_start,
+    const int32_t* __restrict__ drow_start, const int32_t* __restrict__ chunk_start, const int32_t n_tiles,
+    int32_t* __restrict__ wstart_g, uint8_t* __restrict__ wn_g, uint16_t* __restrict__ items_g)
+{
+    const int32_t TL = @TL@, R = @R@, LPW = @LPW@, NW = @NW@, LOCAL_BITS = @LOCAL_BITS@;
+    __shared__ uint32_t sm[8][TL];
+    __shared__ int32_t sn[8][NW];
+    const int lane = threadIdx.x & 31, wib = threadIdx.x >> 5;
+    const int32_t gc = blockIdx.x * 8 + wib;
+    if (gc >= chunk_start[n_tiles]) return;
+    int32_t lo = 0, hi = n_tiles;                 // last t with chunk_start[t] <= gc
+    while (hi - lo > 1) { const int32_t mid = (lo + hi) >> 1; if (chunk_start[mid] <= gc) lo = mid; else hi = mid; }
+    const int32_t t = lo, c = gc - chunk_start[t];
+    const int32_t e0 = tile_start[t], e1 = tile_start[t + 1];
+    const int32_t d0 = drow_start[t], dn = drow_start[t + 1] - d0;
+    for (int i = lane; i < TL; i += 32) sm[wib][i] = 0u;
+    if (lane < NW) sn[wib][lane] = 0;
+    // first entry with distinct-row rank >= c * R (rank = seg_incl - 1 - d0), and the same for (c + 1) * R
+    int32_t bnd[2];
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+        const int32_t target = d0 + (c + q) * R;         // first e with seg_incl[e] > target
+        if (q == 1 && (c + 1) * R >= dn) { bnd[q] = e1; continue; }
+        int32_t a = e0, b = e1;
+        while (a < b) { const int32_t m = (a + b) >> 1; if (seg_incl[m] > target) b = m; else a = m + 1; }
+        bnd[q] = a;
+    }
+    const int32_t cs = bnd[0], ce = bnd[1];
+    __syncwarp();
+    for (int32_t e = cs + lane; e < ce; e += 32) {
+        const int32_t rr = seg_incl[e] - 1 - d0 - c * R;
+        const int32_t ll = (int32_t)(e_key[e] & ((1u << LOCAL_BITS) - 1)) % TL;
+        atomicOr(&sm[wib][ll], 1u << rr);
+        atomicAdd(&sn[wib][ll / LPW], 1);
+    }
+    __syncwarp();
+    if (lane < NW) {
+        int32_t ws = cs;
+        for (int w = 0; w < lane; ++w) ws += sn[wib][w];
+        uint32_t m[LPW]; uint32_t u = 0u;
+#pragma unroll
+        for (int j = 0; j < LPW; ++j) { m[j] = sm[wib][lane * LPW + j]; u |= m[j]; }
+        const int64_t g = (int64_t)gc;
+        wstart_g[g * NW + lane] = ws;
+        int32_t k = 0;
+        while (u) {
+            const int32_t r = __ffs(u) - 1;
+            u &= u - 1;
+            uint32_t mk = 0u;
+#pragma unroll
+            for (int j = 0; j < LPW; ++j) mk |= ((m[j] >> r) & 1u) << j;
+            items_g[ws + k++] = (uint16_t)(r | (mk << 8));
+        }
+        wn_g[g * NW + lane] = (uint8_t)k;
     }
 }
 """
@@ -274,6 +341,11 @@ def _lists_kernel():
     return _tb._get_kernel(("pull_lists", TL, R, LPW), src, "pull_lists")
 
 
+def _items_kernel():
+    src = _tb._render(_ITEMS_SRC, TL=TL, R=R, LPW=LPW, NW=NW, LOCAL_BITS=_tb.LOCAL_BITS)
+    return _tb._get_kernel(("pull_items", TL, R, LPW), src, "pull_items")
+
+
 def _pull_kernel(out_size: int):
     src = _tb._render(_PULL_SRC, TL=TL, R=R, LPW=LPW, NW=NW, SLICE=SLICE, OUT=out_size, NS=NS, VT={2: "float2", 4: "float4"}[VEC], MINB=MINB, UNROLL=int(os.environ.get("NNUE_PULL_UNROLL", "4")))
     shm = NS * R * SLICE * 4
@@ -299,7 +371,8 @@ class PullPrep:
     def record_stream(self, stream):
         for t in (self.order, self.tile_rows, self.drow_start, self.chunk_start, self.cnt, self.wstart, self.ent,
                   self.wn, self.items):
-            t.record_stream(stream)
+            if t is not None:
+                t.record_stream(stream)
 
 
 def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, bp) -> PullPrep | None:
@@ -340,15 +413,21 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, bp) -> Pul
     chunk_start = torch.zeros(bp.n_tiles + 1, dtype=torch.int32, device=dev)
     chunk_start[1:] = torch.cumsum(nch, 0)
     n_chunks = E // R + bp.n_tiles                                    # upper bound of sum(ceil(nd / R))
-    cnt = torch.empty(max(n_chunks, 1) * TL, dtype=torch.uint8, device=dev)
+    use_items = ITEMS_KERNEL and NW <= 8 and R <= 32
+    cnt = None if use_items else torch.empty(max(n_chunks, 1) * TL, dtype=torch.uint8, device=dev)
     wstart = torch.empty(max(n_chunks, 1) * NW, dtype=torch.int32, device=dev)
-    ent = torch.zeros(E + 64, dtype=torch.uint8, device=dev)
+    ent = None if use_items else torch.zeros(E + 64, dtype=torch.uint8, device=dev)
     wn = torch.empty(max(n_chunks, 1) * NW, dtype=torch.uint8, device=dev)
     items = torch.zeros(E + 64, dtype=torch.int16, device=dev)        # padded: the gather reads 32 items past a warp start
     with _tb._cupy_stream(dev):
-        _lists_kernel()(grid=(bp.n_tiles,), block=(TL,), args=(
-            bp.e_key.data_ptr(), seg_before.data_ptr(), bp.tile_start.data_ptr(), drow_start.data_ptr(),
-            chunk_start.data_ptr(), cnt.data_ptr(), wstart.data_ptr(), ent.data_ptr(), wn.data_ptr(), items.data_ptr()))
+        if use_items:      # cnt / ent are only intermediates of the list kernel; the gather reads wstart / wn / items
+            _items_kernel()(grid=((max(n_chunks, 1) + 7) // 8,), block=(256,), args=(
+                bp.e_key.data_ptr(), seg_before.data_ptr(), bp.tile_start.data_ptr(), drow_start.data_ptr(),
+                chunk_start.data_ptr(), np.int32(bp.n_tiles), wstart.data_ptr(), wn.data_ptr(), items.data_ptr()))
+        else:
+            _lists_kernel()(grid=(bp.n_tiles,), block=(TL,), args=(
+                bp.e_key.data_ptr(), seg_before.data_ptr(), bp.tile_start.data_ptr(), drow_start.data_ptr(),
+                chunk_start.data_ptr(), cnt.data_ptr(), wstart.data_ptr(), ent.data_ptr(), wn.data_ptr(), items.data_ptr()))
     return PullPrep(bp.n_lists, bp.n_tiles, bp.order, tile_rows, drow_start, chunk_start, cnt, wstart, ent, wn, items)
 
 
