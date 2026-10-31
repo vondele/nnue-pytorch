@@ -308,6 +308,7 @@ extern "C" __global__ void __launch_bounds__(@NWARPS@ * 32) tiled_scatter(
     // 3. row segments: warp w walks part w of the tile's sorted entry stream
     const int32_t e0 = tile_start[tile], e1 = tile_start[tile + 1];
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    uint32_t* ksh = (uint32_t*)(Gsh + T * SLICE) + warp * 32;
     const int32_t per = (e1 - e0 + @NWARPS@ - 1) / @NWARPS@;
     const int32_t s = e0 + warp * per;
     const int32_t e = min(s + per, e1);
@@ -323,13 +324,16 @@ extern "C" __global__ void __launch_bounds__(@NWARPS@ * 32) tiled_scatter(
         const int32_t nk = min(32, e - base);
         const uint32_t mykey = nextkey;
         nextkey = (base + 32 + lane < e) ? __ldg(&e_key[base + 32 + lane]) : 0u;
+        __syncwarp();
+        ksh[lane] = mykey;                                  // the 32 keys, read back as broadcasts
+        __syncwarp();
         int j = 0;
         for (; j + U <= nk; j += U) {
             uint32_t key[U];
             GV gv[U];
 #pragma unroll
             for (int u = 0; u < U; ++u) {
-                key[u] = __shfl_sync(0xFFFFFFFFu, mykey, j + u);
+                key[u] = ksh[j + u];
                 const int l = (int)(key[u] & ((1u << LOCAL_BITS) - 1));
                 gv[u] = *(const GV*)(Gsh + l * SLICE + lane * CPL);
             }
@@ -351,7 +355,7 @@ extern "C" __global__ void __launch_bounds__(@NWARPS@ * 32) tiled_scatter(
             }
         }
         for (; j < nk; ++j) {
-            const uint32_t key = __shfl_sync(0xFFFFFFFFu, mykey, j);
+            const uint32_t key = ksh[j];
             const uint32_t r = key >> LOCAL_BITS;
             const int l = (int)(key & ((1u << LOCAL_BITS) - 1));
             if (r != cur) {
@@ -387,7 +391,7 @@ def _scatter_kernel(T: int, slice_cols: int, l1_size: int, out_size: int, slice_
         raise ValueError(f"slice must be a multiple of 32, at most {32 * nwarps}, and divide l1_size; got {slice_cols}")
     if nwarps not in (4, 8, 16, 32):
         raise ValueError(f"nwarps must be 4, 8, 16 or 32, got {nwarps}")
-    shm = T * slice_cols * 4
+    shm = T * slice_cols * 4 + nwarps * 128
     if shm > MAX_SHARED_BYTES:
         raise ValueError(f"T={T} x slice={slice_cols} needs {shm} B of shared memory > {MAX_SHARED_BYTES}")
     src = _render(_SCATTER_SRC, T=T, SLICE=slice_cols, OUT=out_size,
@@ -659,7 +663,7 @@ def tiled_backward(white_indices, black_indices, grad_w, grad_b, num_inputs, l1_
         slice_fastest = grid == "slice"
         launch_grid = (n_slices, prep.n_tiles) if slice_fastest else (prep.n_tiles, n_slices)
         _scatter_kernel(prep.T, slice_cols, l1_size, OUT, slice_fastest, nwarps)(
-            grid=launch_grid, block=(32 * nwarps,), shared_mem=prep.T * slice_cols * 4, args=(
+            grid=launch_grid, block=(32 * nwarps,), shared_mem=prep.T * slice_cols * 4 + nwarps * 128, args=(
                 grad_w.data_ptr(), grad_b.data_ptr(), prep.order.data_ptr(), prep.tile_map.data_ptr(),
                 prep.tile_start.data_ptr(), prep.e_key.data_ptr(), grad_weight.data_ptr(), grad_bias.data_ptr(),
                 np.int32(n_lists), np.int32(B), row_touched.data_ptr()))
