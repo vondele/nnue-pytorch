@@ -1,0 +1,562 @@
+"""Tiled segmented-reduction backward for the double feature transformer.
+
+Used by ``FusedDoubleFtFunction`` (fused_ft_functions.py, through tiled_ft_fused.py) when CUDA + CuPy are available;
+``NNUE_TILED_BACKWARD=0`` (read once at import time) selects the plain per-position atomic backward
+of ``kernel.py``. Layer widths the tiled kernels do not support (``l1_size`` not a multiple of the
+column slice) also use the plain backward. User docs: ``docs/TILED_BACKWARD.md``.
+
+Pipeline for one backward (same math as the plain kernel; fp32 sums in a different order, like the
+atomics themselves):
+
+1. Index preparation (``prepare``; depends only on the feature indices, so the loader's prefetch
+   worker runs it ahead of time on its own CUDA stream, see ``register_prep``/``lookup_prep``):
+   * ``order_key`` + one sort of 2B keys: the perspective lists are ordered by
+     [king bucket][4 min-hash values] so that consecutive lists share rows;
+   * the lists are grouped into tiles of T; ``tile_key`` writes for every (row, list) pair of a
+     tile a 32-bit key (row << 8 | local list index), grouped per tile;
+   * ``tile_sort`` sorts each tile's keys in shared memory (bitonic, one block per tile) so every
+     row of a tile becomes one contiguous segment. (``NNUE_TILED_SORT=global``: one global sort of
+     (tile, key) instead; also the automatic fallback when a tile has more entries than the
+     shared-memory capacity.)
+2. The gradient rows G of list li are the incoming output gradients (grad of the white outputs for
+   li < B, of the black outputs otherwise); no extra kernel or copy is needed.
+3. ``tiled_scatter``: grid (n_tiles, l1_size / SLICE), NWARPS warps (default 32), T x SLICE fp32 of
+   dynamic shared memory holding the tile's gradient rows for the block's column slice. The
+   warps walk NWARPS contiguous parts of the tile's row-sorted entry stream; each lane owns SLICE/32
+   columns, sums each row segment in registers and issues ONE coalesced atomicAdd per
+   (row, column) per tile (per warp part) instead of one per (list, row, column). The block also
+   adds its tile's column sums to ``grad_bias`` (the l1 part).
+4. ``psqt_scatter``: the PSQT weight columns (only the non-zero gradients, usually one per list)
+   with plain atomics; the PSQT part of the bias gradient is a column sum.
+
+Side table (``register_prep`` / ``lookup_prep``): the prefetch worker of
+``data_loader.dataset.FixedNumBatchesDataset`` computes the preparation for every standard batch on
+its own CUDA stream and stores it keyed by ``white_indices.data_ptr()`` together with a weak
+reference to that tensor. ``FusedDoubleFtFunction`` looks it up by the tensor it receives:
+the entry is used only if the registered tensor object is still alive and has the same data_ptr and
+shape (then the two tensors alias the same, never-modified index block), otherwise the preparation
+is recomputed inside backward (``fallback`` counter in ``STATS``). The batch tuple itself is left
+untouched (7-tuple contract).
+
+Environment (defaults of the keyword arguments below): ``NNUE_TILED_BACKWARD=0`` disable;
+``NNUE_TILED_T`` tile size (default 256); ``NNUE_TILED_SLICE`` columns per block (default 64; 256, 128 or 64;
+T * SLICE * 4 bytes of shared memory per block, at most ~99 KB on Ampere consumer cards);
+``NNUE_TILED_ORDER`` ``kb_minhash`` (default) | ``minhash`` | ``identity``; ``NNUE_TILED_SORT``
+``block`` (default) | ``global``; ``NNUE_TILED_GRID``
+``tile`` (default, consecutive blocks = consecutive tiles of the sorted order) | ``slice`` |
+``shuffle``; ``NNUE_TILED_WARPS`` warps per scatter block (default 32; the warps split the tile's entry
+stream, more warps hide the shared-memory latency of the entry walk); ``NNUE_TILED_HK_OFF`` first HalfKA row of the composed feature set (default 60720 =
+Full_Threats), only used by the ordering heuristic; ``NNUE_TILED_PREFETCH=0`` disables
+the prefetch-side preparation (the backward then prepares itself).
+"""
+from __future__ import annotations
+
+import collections
+import os
+import threading
+import weakref
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+
+try:
+    import cupy as cp
+
+    _HAS_CUPY = True
+except (ImportError, OSError, RuntimeError):  # pragma: no cover - CuPy missing
+    cp = None
+    _HAS_CUPY = False
+
+TILED_BACKWARD_ENABLED = os.environ.get("NNUE_TILED_BACKWARD", "1") != "0"   # default on; NNUE_TILED_BACKWARD=0 selects the plain kernel
+DEFAULT_T = int(os.environ.get("NNUE_TILED_T", "256"))
+DEFAULT_SLICE = int(os.environ.get("NNUE_TILED_SLICE", "64"))
+DEFAULT_ORDER = os.environ.get("NNUE_TILED_ORDER", "kb_minhash")
+DEFAULT_SORT = os.environ.get("NNUE_TILED_SORT", "block")
+DEFAULT_GRID = os.environ.get("NNUE_TILED_GRID", "tile")
+DEFAULT_WARPS = int(os.environ.get("NNUE_TILED_WARPS", "32"))
+DEFAULT_HK_OFF = int(os.environ.get("NNUE_TILED_HK_OFF", "64368"))
+PREFETCH_PREP = os.environ.get("NNUE_TILED_PREFETCH", "1") == "1"  # 0: always prepare inside backward (benchmarking)
+
+ROW_BITS = 20        # row index bits in the tile keys (feature sets up to 1M rows)
+LOCAL_BITS = 8       # T <= 256
+MAX_T = 256
+MAX_SHARED_BYTES = 99 * 1024      # dynamic shared memory per block we allow (GA102: 101376 B)
+SORT_CAP_MAX = 16384              # max entries per tile for the in-block sort (64 KB of shared memory)
+
+STATS = collections.Counter()  # "prep_registered", "prep_hit", "fallback", "global_sort_fallback"
+
+_kernels: dict = {}
+_kernel_lock = threading.Lock()
+
+
+def _render(src: str, **kw) -> str:
+    kw = dict(kw, LIST_ROW="((li) < batch_size ? white + (int64_t)(li) * MAXA : black + (int64_t)((li) - batch_size) * MAXA)")
+    for k, v in kw.items():
+        src = src.replace("@" + k + "@", str(v))
+    return src
+
+
+def _get_kernel(key, src, name, dynamic_shared: int = 0):
+    with _kernel_lock:
+        k = _kernels.get(key)
+        if k is None:
+            k = cp.RawKernel(src, name)
+            k.compile()
+            if dynamic_shared > 48 * 1024:
+                k.max_dynamic_shared_size_bytes = dynamic_shared
+            _kernels[key] = k
+        return k
+
+
+class _cupy_stream:
+    """Run CuPy kernel launches on the current torch stream of the current device."""
+
+    def __init__(self, device: torch.device):
+        self.dev = cp.cuda.Device(device.index if device.index is not None else torch.cuda.current_device())
+        self.stream = cp.cuda.ExternalStream(torch.cuda.current_stream(device).cuda_stream)
+
+    def __enter__(self):
+        self.dev.__enter__()
+        self.stream.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self.stream.__exit__(*exc)
+        self.dev.__exit__(*exc)
+
+
+_HDR = "typedef int int32_t; typedef long long int64_t; typedef unsigned int uint32_t; typedef unsigned char uint8_t;\n"
+
+# ----------------------------------------------------------------------------- kernels
+
+_ORDER_KEY_SRC = _HDR + r"""
+extern "C" __global__ void order_key(const int32_t* __restrict__ white, const int32_t* __restrict__ black,
+    const uint32_t* __restrict__ hash_a, const uint32_t* __restrict__ hash_b, int64_t* __restrict__ keys,
+    int32_t* __restrict__ counts, const int32_t n_lists, const int32_t batch_size, const int32_t hk_off, const int32_t kb_first)
+{
+    const int32_t MAXA = @MAXA@, NKEYS = @NKEYS@, BITS = @BITS@;
+    const int32_t li = blockIdx.x * blockDim.x + threadIdx.x;
+    if (li >= n_lists) return;
+    const int32_t* row = @LIST_ROW@;
+    uint32_t mn[NKEYS]; int32_t mx = -1; int32_t n = 0;
+    for (int j = 0; j < NKEYS; ++j) mn[j] = (1u << BITS) - 1;
+    for (int k = 0; k < MAXA; ++k) {
+        const int32_t r = row[k];
+        if (r < 0) break;
+        ++n;
+        mx = max(mx, r);
+        for (int j = 0; j < NKEYS; ++j) {
+            const uint32_t h = (((uint32_t)r * hash_a[j] + hash_b[j]) >> 7) & ((1u << BITS) - 1);
+            mn[j] = min(mn[j], h);
+        }
+    }
+    int64_t key = 0;
+    if (kb_first) { int32_t kb = (mx - hk_off) / 768; kb = kb < 0 ? 0 : (kb > 127 ? 127 : kb); key = kb; }
+    for (int j = 0; j < NKEYS; ++j) key = (key << BITS) | (int64_t)mn[j];
+    keys[li] = key;
+    counts[li] = n;
+}
+"""
+
+
+def _order_key_kernel(max_active: int, n_keys: int = 4, key_bits: int = 14):
+    src = _render(_ORDER_KEY_SRC, MAXA=max_active, NKEYS=n_keys, BITS=key_bits)
+    return _get_kernel(("order_key", max_active, n_keys, key_bits), src, "order_key")
+
+
+_TILE_KEY_SRC = _HDR + r"""
+// 32-bit keys (row << LOCAL_BITS | local list index), written per list at its offset; the lists of
+// a tile are consecutive in tile order, so the keys of a tile are contiguous (unsorted).
+// One warp per list: lanes read 32 consecutive slots and write 32 consecutive keys (coalesced).
+extern "C" __global__ void tile_key(const int32_t* __restrict__ white, const int32_t* __restrict__ black,
+    const int32_t* __restrict__ order, const int32_t* __restrict__ offsets, uint32_t* __restrict__ keys,
+    const int32_t n_lists, const int32_t batch_size)
+{
+    const int32_t MAXA = @MAXA@, T = @T@, LOCAL_BITS = @LOCAL_BITS@;
+    const int32_t p = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;   // position in tile order
+    const int lane = threadIdx.x & 31;
+    if (p >= n_lists) return;
+    const int32_t li = order[p];
+    const int32_t* row = @LIST_ROW@;
+    const uint32_t local = (uint32_t)(p % T);
+    const int32_t o = offsets[p];
+    for (int k = lane; k < MAXA; k += 32) {
+        const int32_t r = row[k];
+        const unsigned active = __ballot_sync(0xFFFFFFFFu, r >= 0);
+        if (r >= 0) keys[o + k] = ((uint32_t)r << LOCAL_BITS) | local;   // lists are left-packed: slot k of a valid entry = its rank
+        if (active != 0xFFFFFFFFu) break;
+    }
+}
+"""
+
+
+def _tile_key_kernel(max_active: int, T: int):
+    src = _render(_TILE_KEY_SRC, MAXA=max_active, T=T, LOCAL_BITS=LOCAL_BITS)
+    return _get_kernel(("tile_key", max_active, T), src, "tile_key")
+
+
+_TILE_SORT_SRC = _HDR + r"""
+// In-place bitonic sort of every tile's keys (one block per tile, shared memory, capacity CAP).
+extern "C" __global__ void tile_sort(const int32_t* __restrict__ tile_start, uint32_t* __restrict__ keys)
+{
+    extern __shared__ uint32_t sh[];
+    const int32_t tile = blockIdx.x;
+    const int32_t e0 = tile_start[tile], n = tile_start[tile + 1] - e0;
+    if (n <= 1) return;
+    int32_t N2 = 1; while (N2 < n) N2 <<= 1;               // n <= CAP = @CAP@ is guaranteed by the host
+    for (int i = threadIdx.x; i < N2; i += blockDim.x) sh[i] = (i < n) ? keys[e0 + i] : 0xFFFFFFFFu;
+    __syncthreads();
+    for (int k = 2; k <= N2; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            for (int i = threadIdx.x; i < N2; i += blockDim.x) {
+                const int ixj = i ^ j;
+                if (ixj > i) {
+                    const uint32_t a = sh[i], b = sh[ixj];
+                    const bool up = (i & k) == 0;
+                    if ((a > b) == up) { sh[i] = b; sh[ixj] = a; }
+                }
+            }
+            __syncthreads();
+        }
+    }
+    for (int i = threadIdx.x; i < n; i += blockDim.x) keys[e0 + i] = sh[i];
+}
+"""
+
+
+def _tile_sort_kernel(cap: int):
+    src = _render(_TILE_SORT_SRC, CAP=cap)
+    return _get_kernel(("tile_sort", cap), src, "tile_sort", dynamic_shared=cap * 4)
+
+
+_SCATTER_SRC = _HDR + r"""
+// One block per (tile, column slice). NWARPS warps; lane owns columns col0 + lane + 32*c, c < CPL.
+extern "C" __global__ void tiled_scatter(
+    const float* __restrict__ Gw, const float* __restrict__ Gb, const int32_t* __restrict__ order, const int32_t* __restrict__ tile_map,
+    const int32_t* __restrict__ tile_start, const uint32_t* __restrict__ e_key,
+    float* __restrict__ grad_weight, float* __restrict__ grad_bias, const int32_t n_lists, const int32_t batch_size)
+{
+    const int32_t T = @T@, SLICE = @SLICE@, OUT = @OUT@, CPL = @CPL@, LOCAL_BITS = @LOCAL_BITS@;
+    extern __shared__ float Gsh[];                          // T * SLICE
+    const int32_t tile = tile_map[@SLICE_FASTEST@ ? blockIdx.y : blockIdx.x];
+    const int32_t slice = @SLICE_FASTEST@ ? blockIdx.x : blockIdx.y;
+    const int32_t col0 = slice * SLICE;
+
+    // 1. the tile's gradient rows for this column slice
+    for (int idx = threadIdx.x; idx < T * SLICE; idx += blockDim.x) {
+        const int l = idx / SLICE, c = idx - l * SLICE;
+        const int32_t li = tile * T + l;
+        float v = 0.0f;
+        if (li < n_lists) {
+            const int32_t lid = order[li];
+            v = lid < batch_size ? Gw[(int64_t)lid * OUT + col0 + c] : Gb[(int64_t)(lid - batch_size) * OUT + col0 + c];
+        }
+        Gsh[idx] = v;
+    }
+    __syncthreads();
+
+    // 2. bias gradient: column sums of the tile
+    if (threadIdx.x < SLICE) {
+        float s = 0.0f;
+        for (int l = 0; l < T; ++l) s += Gsh[l * SLICE + threadIdx.x];
+        if (s != 0.0f) atomicAdd(&grad_bias[col0 + threadIdx.x], s);
+    }
+
+    // 3. row segments: warp w walks part w of the tile's sorted entry stream
+    const int32_t e0 = tile_start[tile], e1 = tile_start[tile + 1];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int32_t per = (e1 - e0 + @NWARPS@ - 1) / @NWARPS@;
+    const int32_t s = e0 + warp * per;
+    const int32_t e = min(s + per, e1);
+    float acc[CPL];
+#pragma unroll
+    for (int c = 0; c < CPL; ++c) acc[c] = 0.0f;
+    uint32_t cur = 0xFFFFFFFFu;
+    for (int32_t base = s; base < e; base += 32) {
+        const int32_t nk = min(32, e - base);
+        const uint32_t mykey = (lane < nk) ? __ldg(&e_key[base + lane]) : 0u;
+        for (int j = 0; j < nk; ++j) {
+            const uint32_t key = __shfl_sync(0xFFFFFFFFu, mykey, j);
+            const uint32_t r = key >> LOCAL_BITS;
+            const int l = (int)(key & ((1u << LOCAL_BITS) - 1));
+            if (r != cur) {
+                if (cur != 0xFFFFFFFFu) {
+                    float* gw = grad_weight + (int64_t)cur * OUT + col0 + lane;
+#pragma unroll
+                    for (int c = 0; c < CPL; ++c) { atomicAdd(gw + 32 * c, acc[c]); acc[c] = 0.0f; }
+                }
+                cur = r;
+            }
+            const float* g = Gsh + l * SLICE + lane;
+#pragma unroll
+            for (int c = 0; c < CPL; ++c) acc[c] += g[32 * c];
+        }
+    }
+    if (cur != 0xFFFFFFFFu) {
+        float* gw = grad_weight + (int64_t)cur * OUT + col0 + lane;
+#pragma unroll
+        for (int c = 0; c < CPL; ++c) atomicAdd(gw + 32 * c, acc[c]);
+    }
+}
+"""
+
+
+def _scatter_kernel(T: int, slice_cols: int, l1_size: int, out_size: int, slice_fastest: bool, nwarps: int):
+    if slice_cols % 32 or slice_cols > 32 * nwarps or l1_size % slice_cols:
+        raise ValueError(f"slice must be a multiple of 32, at most {32 * nwarps}, and divide l1_size; got {slice_cols}")
+    if nwarps not in (4, 8, 16, 32):
+        raise ValueError(f"nwarps must be 4, 8, 16 or 32, got {nwarps}")
+    shm = T * slice_cols * 4
+    if shm > MAX_SHARED_BYTES:
+        raise ValueError(f"T={T} x slice={slice_cols} needs {shm} B of shared memory > {MAX_SHARED_BYTES}")
+    src = _render(_SCATTER_SRC, T=T, SLICE=slice_cols, OUT=out_size,
+                  CPL=slice_cols // 32, LOCAL_BITS=LOCAL_BITS,
+                  SLICE_FASTEST=1 if slice_fastest else 0, NWARPS=nwarps)
+    key = ("scatter", T, slice_cols, l1_size, out_size, slice_fastest, nwarps)
+    return _get_kernel(key, src, "tiled_scatter", dynamic_shared=shm)
+
+
+_PSQT_SRC = _HDR + r"""
+// One thread per (list, slot): the PSQT columns of the row's weight gradient (zero gradients skipped).
+extern "C" __global__ void psqt_scatter(
+    const int32_t* __restrict__ white, const int32_t* __restrict__ black,
+    const float* __restrict__ Gw, const float* __restrict__ Gb, float* __restrict__ grad_weight,
+    const int32_t n_lists, const int32_t batch_size)
+{
+    const int32_t MAXA = @MAXA@, L1 = @L1@, OUT = @OUT@;
+    const int64_t gid = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t li = (int32_t)(gid / MAXA); const int32_t k = (int32_t)(gid % MAXA);
+    if (li >= n_lists) return;
+    const int32_t r = (@LIST_ROW@)[k];
+    if (r < 0) return;
+    const float* g = (li < batch_size ? Gw + (int64_t)li * OUT : Gb + (int64_t)(li - batch_size) * OUT) + L1;
+    float* gw = grad_weight + (int64_t)r * OUT + L1;
+    for (int p = 0; p < OUT - L1; ++p) { const float v = g[p]; if (v != 0.0f) atomicAdd(gw + p, v); }
+}
+"""
+
+
+def _psqt_scatter_kernel(max_active: int, l1_size: int, out_size: int):
+    src = _render(_PSQT_SRC, MAXA=max_active, L1=l1_size, OUT=out_size)
+    return _get_kernel(("psqt_scatter", max_active, l1_size, out_size), src, "psqt_scatter")
+
+
+# ----------------------------------------------------------------------------- preparation
+
+@dataclass
+class TiledPrep:
+    """Index-only preparation of one batch: list order and per-tile row-sorted entries."""
+
+    T: int
+    n_lists: int
+    order: torch.Tensor       # (n_lists,) int32: list ids in tile order (white lists 0..B-1, black B..2B-1)
+    tile_start: torch.Tensor  # (n_tiles + 1,) int32
+    e_key: torch.Tensor       # (E,) uint32 (stored as int32): row << LOCAL_BITS | local, sorted within each tile
+    n_tiles: int
+    tile_map: torch.Tensor    # (n_tiles,) int32: block index -> tile (identity unless grid == "shuffle")
+
+    def record_stream(self, stream):
+        for t in (self.order, self.tile_start, self.e_key, self.tile_map):
+            t.record_stream(stream)
+
+
+def _mark(timers, name, dev):
+    if timers is not None:
+        e = torch.cuda.Event(enable_timing=True)
+        e.record(torch.cuda.current_stream(dev))
+        timers.setdefault("_events", []).append((name, e))
+
+
+def finish_timers(timers, dev=None):
+    """Turn the events recorded by prepare()/tiled_backward() into ms per stage (synchronises)."""
+    ev = timers.pop("_events", [])
+    if not ev:
+        return timers
+    torch.cuda.synchronize(dev)
+    for (n0, e0), (n1, e1) in zip(ev[:-1], ev[1:]):
+        if n1 == "start":
+            continue
+        timers[n1] = timers.get(n1, 0.0) + e0.elapsed_time(e1)
+    return timers
+
+
+def list_counts(white: torch.Tensor, black: torch.Tensor) -> torch.Tensor:
+    return torch.cat([(white >= 0).sum(1, dtype=torch.int32), (black >= 0).sum(1, dtype=torch.int32)])
+
+
+def list_order(white: torch.Tensor, black: torch.Tensor, order: str = DEFAULT_ORDER, hk_off: int = DEFAULT_HK_OFF, seed: int = 0,
+               with_counts: bool = False):
+    """Permutation of the perspective lists (white 0..B-1, black B..2B-1; int32) used to form the tiles.
+    With ``with_counts`` also returns the number of active rows per list (int32, list order)."""
+    B, maxa = white.shape
+    n_lists = 2 * B
+    dev = white.device
+    if order == "identity":
+        o = torch.arange(n_lists, device=dev, dtype=torch.int32)
+        return (o, list_counts(white, black)) if with_counts else o
+    if order not in ("kb_minhash", "minhash"):
+        raise ValueError(f"unknown NNUE_TILED_ORDER {order!r}")
+    g = torch.Generator(device=dev).manual_seed(seed)
+    a = (torch.randint(1, 2**31 - 1, (4,), generator=g, device=dev) | 1).to(torch.int32)
+    b = torch.randint(0, 2**31 - 1, (4,), generator=g, device=dev).to(torch.int32)
+    keys = torch.empty(n_lists, dtype=torch.int64, device=dev)
+    counts = torch.empty(n_lists, dtype=torch.int32, device=dev)
+    with _cupy_stream(dev):
+        _order_key_kernel(maxa)(grid=((n_lists + 255) // 256,), block=(256,), args=(
+            white.data_ptr(), black.data_ptr(), a.data_ptr(), b.data_ptr(), keys.data_ptr(), counts.data_ptr(),
+            np.int32(n_lists), np.int32(B), np.int32(hk_off), np.int32(1 if order == "kb_minhash" else 0)))
+    o = torch.sort(keys)[1].to(torch.int32)
+    return (o, counts) if with_counts else o
+
+
+def _sort_cap(T: int) -> int:
+    cap = 1
+    while cap < T * 128:
+        cap <<= 1
+    return cap
+
+
+def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = DEFAULT_T,
+            order: str = DEFAULT_ORDER, hk_off: int = DEFAULT_HK_OFF, sort: str = DEFAULT_SORT,
+            grid: str = DEFAULT_GRID, timers: dict | None = None,
+            order_perm: torch.Tensor | None = None, list_counts_cache: torch.Tensor | None = None) -> TiledPrep:
+    """Build the tile structure for a batch (both perspectives; only the indices are read).
+    ``order_perm``: an already computed list permutation (int32, 2B) to reuse instead of ``list_order``
+    (the tiled forward builds its smaller tiles from the backward's order)."""
+    assert white_indices.dtype == torch.int32 and white_indices.is_cuda
+    assert 1 <= T <= MAX_T
+    dev = white_indices.device
+    _mark(timers, "start", dev)
+    white_indices = white_indices.contiguous(); black_indices = black_indices.contiguous()
+    B, maxa = white_indices.shape
+    n_lists = 2 * B
+    n_tiles = (n_lists + T - 1) // T
+    if order_perm is None:
+        o, counts = list_order(white_indices, black_indices, order, hk_off, with_counts=True)
+    else:
+        o, counts = order_perm, (list_counts(white_indices, black_indices) if list_counts_cache is None else list_counts_cache)
+    _mark(timers, "order", dev)
+    counts = counts[o.long()]
+    offsets = torch.zeros(n_lists + 1, dtype=torch.int32, device=dev)
+    offsets[1:] = torch.cumsum(counts, 0)
+    tile_start = torch.cat([offsets[0:n_lists:T], offsets[n_lists:]]).contiguous()
+    tile_n = tile_start[1:] - tile_start[:-1]
+    E, max_tile = (int(x) for x in torch.stack([offsets[-1], tile_n.max()]).tolist())  # one host sync per batch
+    E, max_tile = max(E, 1), max(max_tile, 1)
+    keys = torch.empty(E, dtype=torch.int32, device=dev)
+    with _cupy_stream(dev):
+        _tile_key_kernel(maxa, T)(grid=((n_lists * 32 + 255) // 256,), block=(256,), args=(
+            white_indices.data_ptr(), black_indices.data_ptr(), o.data_ptr(), offsets.data_ptr(), keys.data_ptr(),
+            np.int32(n_lists), np.int32(B)))
+    _mark(timers, "keys", dev)
+    cap = _sort_cap(T)
+    if sort == "block" and cap <= SORT_CAP_MAX and max_tile <= cap:  # T <= 128 (T=256 always uses the global sort)
+        with _cupy_stream(dev):
+            _tile_sort_kernel(cap)(grid=(n_tiles,), block=(512,), shared_mem=cap * 4, args=(
+                tile_start.data_ptr(), keys.data_ptr()))
+    else:
+        if sort == "block" and cap <= SORT_CAP_MAX:
+            STATS["global_sort_fallback"] += 1  # a tile exceeded the shared-memory capacity
+        tile_of = torch.repeat_interleave(torch.arange(n_tiles, device=dev, dtype=torch.int64), tile_n.long())
+        full = (tile_of << 32) | (keys.to(torch.int64) & 0xFFFFFFFF)
+        keys = (torch.sort(full)[0] & 0xFFFFFFFF).to(torch.int32)
+    _mark(timers, "sort", dev)
+    if grid == "shuffle":
+        tile_map = torch.randperm(n_tiles, device=dev, generator=torch.Generator(device=dev).manual_seed(1)).to(torch.int32)
+    else:
+        tile_map = torch.arange(n_tiles, device=dev, dtype=torch.int32)
+    prep = TiledPrep(T, n_lists, o, tile_start, keys, n_tiles, tile_map)
+    prep.counts = counts       # active rows per list, in list order (int32); reusable by the tiled forward
+    prep.max_tile = max_tile   # largest number of entries in one tile (the tiled forward sizes its staging with it)
+    return prep
+
+
+# side table: data_ptr(white_indices) -> (weakref to the registered tensor, shape, prep)
+_PREP_CACHE_MAX = 16
+_prep_cache: "collections.OrderedDict[int, tuple]" = collections.OrderedDict()
+_prep_lock = threading.Lock()
+
+
+def register_prep(white_indices: torch.Tensor, black_indices: torch.Tensor, **kw) -> TiledPrep | None:
+    """Compute and store the preparation for a batch (called by the loader's prefetch worker on
+    its own CUDA stream). Never raises into the loader: failures only mean a fallback later.
+    Returns the preparation (the tiled forward reuses its list order) or None when disabled."""
+    if not (TILED_BACKWARD_ENABLED and PREFETCH_PREP and _HAS_CUPY and white_indices.is_cuda):
+        return None
+    prep = prepare(white_indices, black_indices, **kw)
+    with _prep_lock:
+        _prep_cache[white_indices.data_ptr()] = (weakref.ref(white_indices), tuple(white_indices.shape), prep)
+        _prep_cache.move_to_end(white_indices.data_ptr())
+        while len(_prep_cache) > _PREP_CACHE_MAX:
+            _prep_cache.popitem(last=False)
+    STATS["prep_registered"] += 1
+    return prep
+
+
+def lookup_prep(white_indices: torch.Tensor) -> TiledPrep | None:
+    """Pop the preparation registered for this index block, if it is still valid."""
+    with _prep_lock:
+        entry = _prep_cache.pop(white_indices.data_ptr(), None)
+    if entry is None:
+        return None
+    ref, shape, prep = entry
+    src = ref()
+    if src is None or src.data_ptr() != white_indices.data_ptr() or tuple(white_indices.shape) != shape:
+        return None
+    # produced on the prefetch stream; the consumer stream already waited on the batch's ready event
+    prep.record_stream(torch.cuda.current_stream(white_indices.device))
+    STATS["prep_hit"] += 1
+    return prep
+
+
+# ----------------------------------------------------------------------------- backward
+
+def applicable(l1_size: int, slice_cols: int = DEFAULT_SLICE) -> bool:
+    """Whether the tiled backward can run for this layer width (else the plain kernel is used)."""
+    return _HAS_CUPY and l1_size % slice_cols == 0 and l1_size >= slice_cols
+
+
+def tiled_backward(white_indices, black_indices, grad_w, grad_b, num_inputs, l1_size,
+                   prep: TiledPrep | None = None, slice_cols: int = DEFAULT_SLICE,
+                   grid: str = DEFAULT_GRID, nwarps: int = DEFAULT_WARPS, timers: dict | None = None):
+    """Weight/bias gradient of the double sparse linear layer (white and black lists share weight
+    and bias); ``grad_w`` / ``grad_b`` (B, OUT) are the output gradients. Columns l1_size.. (the
+    PSQT columns) use plain atomics. Returns (grad_weight, grad_bias)."""
+    dev = grad_w.device
+    B, maxa = white_indices.shape
+    OUT = grad_w.shape[1]
+    _mark(timers, "start", dev)
+    if prep is None:
+        STATS["fallback"] += 1
+        # the fallback tile size must fit the caller's column slice into shared memory
+        T_fb = min(DEFAULT_T, MAX_T, (MAX_SHARED_BYTES // (slice_cols * 4)) // 32 * 32)
+        prep = prepare(white_indices, black_indices, T=T_fb, grid=grid)
+        _mark(timers, "prep_fallback", dev)
+    n_lists = 2 * B
+    if prep.n_lists != n_lists:
+        raise RuntimeError("tiled backward: preparation does not match the batch")
+    white_indices = white_indices.contiguous(); black_indices = black_indices.contiguous()
+    grad_w = grad_w.contiguous(); grad_b = grad_b.contiguous()
+
+    grad_weight = torch.zeros(num_inputs, OUT, dtype=torch.float32, device=dev)
+    grad_bias = torch.zeros(OUT, dtype=torch.float32, device=dev)
+    if OUT > l1_size:
+        grad_bias[l1_size:] = grad_w[:, l1_size:].sum(0) + grad_b[:, l1_size:].sum(0)
+    _mark(timers, "alloc", dev)
+    with _cupy_stream(dev):
+        n_slices = l1_size // slice_cols
+        slice_fastest = grid == "slice"
+        launch_grid = (n_slices, prep.n_tiles) if slice_fastest else (prep.n_tiles, n_slices)
+        _scatter_kernel(prep.T, slice_cols, l1_size, OUT, slice_fastest, nwarps)(
+            grid=launch_grid, block=(32 * nwarps,), shared_mem=prep.T * slice_cols * 4, args=(
+                grad_w.data_ptr(), grad_b.data_ptr(), prep.order.data_ptr(), prep.tile_map.data_ptr(),
+                prep.tile_start.data_ptr(), prep.e_key.data_ptr(), grad_weight.data_ptr(), grad_bias.data_ptr(),
+                np.int32(n_lists), np.int32(B)))
+        _mark(timers, "scatter", dev)
+        if OUT > l1_size:
+            _psqt_scatter_kernel(maxa, l1_size, OUT)(grid=((n_lists * maxa + 255) // 256,), block=(256,), args=(
+                white_indices.data_ptr(), black_indices.data_ptr(), grad_w.data_ptr(), grad_b.data_ptr(),
+                grad_weight.data_ptr(), np.int32(n_lists), np.int32(B)))
+        _mark(timers, "psqt", dev)
+    return grad_weight, grad_bias

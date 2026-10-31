@@ -15,6 +15,12 @@ try:
 except (ImportError, OSError, RuntimeError):
     BACKWARD_TILE_SIZE = 1
 
+# Tiled forward / backward (docs/TILED_FT.md); NNUE_TILED_FORWARD=0 / NNUE_TILED_BACKWARD=0 disable them.
+try:
+    from . import tiled_ft_fused as _tiled_ft
+except (ImportError, OSError, RuntimeError):
+    _tiled_ft = None
+
 
 def _use_aggregated_backward(
     l1_size, batch_size, max_active_features, device, *, mode="auto"
@@ -107,29 +113,42 @@ class FusedDoubleFtFunction(autograd.Function):
         max_active_features = white_indices.shape[1]
         l1_half = l1_size // 2
 
-        l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
-        clamped_out = torch.empty(
-            batch_size, 4, l1_half, dtype=torch.float32, device=us.device
+        tiled = (
+            _tiled_ft.forward(
+                us, them, white_indices, black_indices, weight, bias,
+                max_ft_activation, l1_size,
+            )
+            if _tiled_ft is not None
+            else None
         )
-
-        output_size = bias.shape[0]
-        kernel = make_fused_double_ft_forward_kernel(max_active_features, l1_size)
-        kernel(
-            grid=(batch_size,),
-            args=(
-                us.data_ptr(),
-                them.data_ptr(),
-                white_indices.data_ptr(),
-                black_indices.data_ptr(),
-                weight.data_ptr(),
-                bias.data_ptr(),
-                np.float32(max_ft_activation),
-                l0_.data_ptr(),
-                clamped_out.data_ptr(),
-                np.int32(output_size),
-            ),
+        ctx.tiled_bwd_prep = (
+            _tiled_ft.lookup_backward_prep(white_indices) if _tiled_ft is not None else None
         )
+        if tiled is not None:
+            l0_, clamped_out = tiled
+        else:
+            l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
+            clamped_out = torch.empty(
+                batch_size, 4, l1_half, dtype=torch.float32, device=us.device
+            )
 
+            output_size = bias.shape[0]
+            kernel = make_fused_double_ft_forward_kernel(max_active_features, l1_size)
+            kernel(
+                grid=(batch_size,),
+                args=(
+                    us.data_ptr(),
+                    them.data_ptr(),
+                    white_indices.data_ptr(),
+                    black_indices.data_ptr(),
+                    weight.data_ptr(),
+                    bias.data_ptr(),
+                    np.float32(max_ft_activation),
+                    l0_.data_ptr(),
+                    clamped_out.data_ptr(),
+                    np.int32(output_size),
+                ),
+            )
         ctx.save_for_backward(
             us, them, white_indices, black_indices, weight, bias, clamped_out
         )
@@ -144,6 +163,14 @@ class FusedDoubleFtFunction(autograd.Function):
         l1_size = ctx.l1_size
 
         grad_l0 = grad_l0.contiguous()
+        if _tiled_ft is not None:
+            prep, ctx.tiled_bwd_prep = ctx.tiled_bwd_prep, None
+            tiled = _tiled_ft.backward(
+                us, them, white_indices, black_indices, grad_l0, clamped_out,
+                weight.shape[0], max_ft_activation, l1_size, prep=prep,
+            )
+            if tiled is not None:
+                return None, None, None, None, *tiled, None, None
 
         batch_size = white_indices.shape[0]
         max_active_features = white_indices.shape[1]
