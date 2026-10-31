@@ -84,3 +84,21 @@ def test_row_flags_bit_identical(pnm):
     base.add_(1)
     assert GRF.lookup(v) is None
 
+
+@cuda
+def test_flagged_total_norm():
+    from model.optimizers import grad_row_flags as GRF
+    g = torch.Generator(device="cuda").manual_seed(3)
+    touched = torch.rand(5000, device="cuda", generator=g) < 0.5
+    base = torch.randn(5000, 1024, device="cuda", generator=g) * touched[:, None]
+    a, b = base[:3000], base[3000:]
+    GRF.register(a, touched[:3000].to(torch.uint8), reset=True)
+    GRF.register(b, touched[3000:].to(torch.uint8))
+    other = torch.randn(777, device="cuda", generator=g)
+    ref = torch.nn.utils.get_total_norm([a, b, other], 2.0).double()
+    got = GRF.total_norm([a, b, other]).double()
+    exact = torch.sqrt((base.double() ** 2).sum() + (other.double() ** 2).sum())
+    assert abs(got - ref) / ref < 1e-6 and abs(got - exact) / exact < 1e-6
+    GRF.clear()
+    assert torch.equal(GRF.total_norm([a, b, other]), torch.nn.utils.get_total_norm([a, b, other], 2.0))
+

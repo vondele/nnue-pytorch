@@ -16,6 +16,8 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from model.optimizers import grad_row_flags as _grf
+
 
 def init_distributed(
     backend: str | None = None,
@@ -79,6 +81,9 @@ def _unwrap_module(module: nn.Module) -> nn.Module:
     while hasattr(module, "_orig_mod"):
         module = module._orig_mod
     return module
+
+
+_FLAGGED_NORM = os.environ.get("NNUE_FLAGGED_NORM", "1") != "0"
 
 
 class SimpleTrainer:
@@ -352,7 +357,12 @@ class SimpleTrainer:
                     # Same math as clip_grad_norm_, but the clip coefficient is handed to the
                     # optimizer, whose fused kernels apply it while reading each gradient.
                     grads = [p.grad for p in self.model.parameters() if p.grad is not None]
-                    total_norm = torch.nn.utils.get_total_norm(grads, 2.0)
+                    # rows of the tiled FT gradient that are exactly +0 are not read (grad_row_flags)
+                    total_norm = (
+                        _grf.total_norm(grads)
+                        if _FLAGGED_NORM
+                        else torch.nn.utils.get_total_norm(grads, 2.0)
+                    )
                     grad_scale = torch.clamp(
                         float(self.gradient_clip_val) / (total_norm + 1e-6), max=1.0
                     )
