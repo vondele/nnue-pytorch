@@ -102,6 +102,68 @@ def _cub_options() -> tuple:
     return ("--std=c++17", "-I" + os.path.join(inc, "cub"), "-I" + os.path.join(inc, "libcudacxx", "include"))
 
 
+# --------------------- kernel-launch probe (diagnostics) ---------------------
+# Every kernel from this module is wrapped: NNUE_PROBE_LOG=<path> logs each
+# launch (name, grid, block, shared memory); a FAILED launch always dumps its
+# parameters and the CUDA context to <path>.failures and re-raises.  Used to
+# diagnose environment-dependent launch failures without perturbing the code.
+
+_PROBE_LOG = os.environ.get("NNUE_PROBE_LOG", "")
+_probe_lock = threading.Lock()
+
+
+def _probe_write(line):
+    path = _PROBE_LOG or "tiled_probe.log"
+    with _probe_lock:
+        with open(path, "a", buffering=1) as f:
+            f.write(line + "\n")
+
+
+def _probe_context():
+    try:
+        st = torch.cuda.current_stream()
+        cst = cp.cuda.get_current_stream()
+        return (
+            f"device : torch current {torch.cuda.current_device()} "
+            f"({torch.cuda.get_device_name(torch.cuda.current_device())})\n"
+            f"stream : torch handle {st.cuda_stream:#x} (device {st.device})\n"
+            f"stream : cupy  handle {cst.ptr:#x}\n"
+            f"ctxdev : cupy current device {cp.cuda.runtime.currentDevice()}\n"
+            f"driver : {cp.cuda.runtime.driverGetVersion()} "
+            f"runtime {cp.cuda.runtime.runtimeGetVersion()}\n"
+        )
+    except Exception as e:
+        return f"context dump failed: {e}\n"
+
+
+class _ProbedKernel:
+    """A cupy RawKernel wrapper for launch diagnostics."""
+
+    def __init__(self, key, inner):
+        self._key, self._inner = key, inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def __call__(self, *a, **kw):
+        grid, block, smem = kw.get("grid"), kw.get("block"), kw.get("shared_mem")
+        if _PROBE_LOG:
+            _probe_write(f"[launch] {self._key} grid={grid} block={block} shared_mem={smem}")
+        try:
+            return self._inner(*a, **kw)
+        except Exception as e:
+            _probe_write(
+                f"===== launch FAILED =====\n"
+                f"kernel : {self._key}\n"
+                f"grid   : {grid}\n"
+                f"block  : {block}\n"
+                f"shared : {smem}\n"
+                f"{_probe_context()}"
+                f"error  : {type(e).__name__}: {e}"
+            )
+            raise
+
+
 def _get_kernel(key, src, name, dynamic_shared: int = 0, options: tuple = ()):
     with _kernel_lock:
         k = _kernels.get(key)
@@ -111,7 +173,7 @@ def _get_kernel(key, src, name, dynamic_shared: int = 0, options: tuple = ()):
             if dynamic_shared > 48 * 1024:
                 k.max_dynamic_shared_size_bytes = dynamic_shared
             _kernels[key] = k
-        return k
+        return _ProbedKernel(key, k)
 
 
 class _cupy_stream:
