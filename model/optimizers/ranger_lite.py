@@ -30,6 +30,8 @@ except Exception:  # noqa: BLE001
 _FUSE_LOOKAHEAD = os.environ.get("NNUE_FUSE_LOOKAHEAD", "1") != "0"
 # Use the FT gradient's row flags (grad_row_flags) in the fused update (NNUE_GRAD_ROW_FLAGS=0 disables).
 _ROW_FLAGS = os.environ.get("NNUE_GRAD_ROW_FLAGS", "1") != "0"
+# Skip whole rows whose state is all +0 and that get no gradient, without reading them (NNUE_LIVE_ROWS=0 disables).
+_LIVE_ROWS = os.environ.get("NNUE_LIVE_ROWS", "1") != "0"
 
 
 def _identity_scalars(lr_div_bc1, eps, bias_correction2, a, b, c):
@@ -85,9 +87,22 @@ extern "C" __global__ void ranger_lite_update_pnm(
     float la_beta,
     const unsigned char* __restrict__ row_flags,
     int row_shift,
-    int dormant_skip
+    int dormant_skip,
+    unsigned char* __restrict__ live_rows
 ) {
+    // live_rows[r] == 0: every state element of row r is +0 (bits). A row that is also unflagged has
+    // g = +0 * scale == 0 for a finite scale, so each of its elements would take the dormant skip below;
+    // the whole row is skipped without reading it. A row that may get a nonzero state is marked live.
+    const bool scale_ok = grad_scale == nullptr || isfinite(*grad_scale);
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
+        if (live_rows != nullptr) {
+            const int64_t r = i >> row_shift;
+            const bool fl = row_flags[r] != 0;
+            if (!live_rows[r]) {
+                if ((fl || !scale_ok) && (i & ((1LL << row_shift) - 1)) == 0) live_rows[r] = 1;
+                else if (dormant_skip && !fl && scale_ok) continue;
+            }
+        }
         // rows without a flag hold exactly +0 (grad_row_flags), so their gradient is not read
         float g = (row_flags == nullptr || row_flags[i >> row_shift]) ? grad[i] : 0.0f;
         if (grad_scale != nullptr) g = __fmul_rn(g, *grad_scale);
@@ -145,9 +160,22 @@ extern "C" __global__ void ranger_lite_update_adam(
     float la_beta,
     const unsigned char* __restrict__ row_flags,
     int row_shift,
-    int dormant_skip
+    int dormant_skip,
+    unsigned char* __restrict__ live_rows
 ) {
+    // live_rows[r] == 0: every state element of row r is +0 (bits). A row that is also unflagged has
+    // g = +0 * scale == 0 for a finite scale, so each of its elements would take the dormant skip below;
+    // the whole row is skipped without reading it. A row that may get a nonzero state is marked live.
+    const bool scale_ok = grad_scale == nullptr || isfinite(*grad_scale);
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
+        if (live_rows != nullptr) {
+            const int64_t r = i >> row_shift;
+            const bool fl = row_flags[r] != 0;
+            if (!live_rows[r]) {
+                if ((fl || !scale_ok) && (i & ((1LL << row_shift) - 1)) == 0) live_rows[r] = 1;
+                else if (dormant_skip && !fl && scale_ok) continue;
+            }
+        }
         // rows without a flag hold exactly +0 (grad_row_flags), so their gradient is not read
         float g = (row_flags == nullptr || row_flags[i >> row_shift]) ? grad[i] : 0.0f;
         if (grad_scale != nullptr) g = __fmul_rn(g, *grad_scale);
@@ -304,6 +332,7 @@ class RangerLite(torch.optim.Optimizer):
             "normloss_factor": normloss_factor,
         }
         super().__init__(params, defaults)
+        self._live_cache = {}   # param -> (state tensors, their versions, live row flags); see _live_rows
 
         self.lookahead_active = lookahead_active
         self.lookahead_mergetime = lookahead_mergetime
@@ -346,6 +375,26 @@ class RangerLite(torch.optim.Optimizer):
                 state["neg_grad_ma"] = torch.zeros_like(
                     p, memory_format=torch.preserve_format
                 )
+
+    def _live_rows(self, p, rows, factors):
+        """Per-row flags of ``p`` for the fused update: 0 means every state element of the row is +0
+        (bits). Computed from the state when the state tensors are new or were changed in place (version
+        counter); afterwards the update kernel marks each row that may get a nonzero state (flagged, or a
+        non-finite gradient scale). None when a state factor could turn +0 into another value."""
+        if not all(math.isfinite(float(np.float32(f))) and float(np.float32(f)) >= 0.0 for f in factors):
+            self._live_cache.pop(p, None)
+            return None
+        state = self.state[p]
+        ts = tuple(state[k] for k in ("grad_ma", "neg_grad_ma", "variance_ma") if k in state)
+        ent = self._live_cache.get(p)
+        if (ent is None or len(ent[0]) != len(ts) or any(a is not b for a, b in zip(ent[0], ts))
+                or ent[1] != tuple(t._version for t in ts) or ent[2].numel() != rows):
+            live = torch.zeros(rows, dtype=torch.bool, device=p.device)
+            for t in ts:
+                live |= (t.detach().reshape(rows, -1).view(torch.int32) != 0).any(1)
+            ent = (ts, tuple(t._version for t in ts), live.to(torch.uint8))
+            self._live_cache[p] = ent
+        return ent[2]
 
     def _can_fuse_group_full(self, group):
         """Full fused path requires no stable_weight_decay and no normloss."""
@@ -437,6 +486,12 @@ class RangerLite(torch.optim.Optimizer):
                     rf = None  # the row length must be a power of two
             rf_ptr = np.uint64(rf.data_ptr() if rf is not None else 0)
             rf_shift = np.int32(grad.shape[1].bit_length() - 1 if rf is not None else 0)
+
+            def live_ptr(*factors, p=p, grad=grad, rf=rf):
+                if rf is None or not _LIVE_ROWS:
+                    return np.uint64(0)
+                live = self._live_rows(p, grad.shape[0], factors)
+                return np.uint64(live.data_ptr() if live is not None else 0)
             block = 512
             grid = (p.numel() + block - 1) // block
 
@@ -473,6 +528,7 @@ class RangerLite(torch.optim.Optimizer):
                     rf_ptr,
                     rf_shift,
                     np.int32(1 if dormant else 0),
+                    live_ptr(beta2, one_minus_beta2, beta1_sq, one_minus_beta1_sq),
                 )
                 _RangerLiteFusedKernels._pnm_kernel(
                     grid=(grid,), block=(block,), args=args
@@ -503,6 +559,7 @@ class RangerLite(torch.optim.Optimizer):
                     rf_ptr,
                     rf_shift,
                     np.int32(1 if dormant else 0),
+                    live_ptr(beta2, one_minus_beta2, beta1, 1.0 - beta1),
                 )
                 _RangerLiteFusedKernels._adam_kernel(
                     grid=(grid,), block=(block,), args=args

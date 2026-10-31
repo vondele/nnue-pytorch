@@ -85,6 +85,42 @@ def test_row_flags_bit_identical(pnm):
     assert GRF.lookup(v) is None
 
 
+def _run_live(use_live, pnm, steps=14, seed=3):
+    from model.optimizers import grad_row_flags as GRF
+    RL._LIVE_ROWS = use_live
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    rows, cols = 300, 64
+    w = torch.nn.Parameter(torch.randn(rows, cols, device="cuda", generator=g))
+    opt = RL.RangerLite([{"params": [w], "lr": 1e-2, "weight_decay": 0.0}], normloss_active=False,
+                        use_stable_weight_decay=False, pnm_activate=pnm, lookahead_mergetime=5)
+    for s in range(steps):
+        touched = (torch.rand(rows, device="cuda", generator=g) < 0.3) & (torch.arange(rows, device="cuda") < 200)
+        w.grad = torch.randn(rows, cols, device="cuda", generator=g) * touched[:, None]
+        GRF.register(w.grad, touched.to(torch.uint8), reset=True)
+        if s == 6:   # state changed in place (version bump): -0.0 and nonzero values in never-touched rows
+            opt.state[w]["grad_ma"][250, 3] = -0.0
+            opt.state[w]["variance_ma"][260] = 1e-3
+        scale = None
+        if s == 9:
+            scale = torch.full((), 0.5, device="cuda")
+        if s == 12:  # a non-finite scale turns the +0 gradients into NaN: every row becomes live
+            scale = torch.full((), float("inf"), device="cuda")
+        opt.step(grad_scale=scale)
+    return [w.detach().clone()] + [t.clone() for t in opt.state[w].values() if torch.is_tensor(t) and t.dim()]
+
+
+@cuda
+@pytest.mark.parametrize("pnm", [True, False])
+def test_live_rows_bit_identical(pnm):
+    try:
+        a = _run_live(True, pnm)
+        b = _run_live(False, pnm)
+    finally:
+        RL._LIVE_ROWS = True
+    for x, y in zip(a, b):
+        assert torch.equal(x.view(torch.int32), y.view(torch.int32))
+
+
 @cuda
 def test_flagged_total_norm():
     from model.optimizers import grad_row_flags as GRF
