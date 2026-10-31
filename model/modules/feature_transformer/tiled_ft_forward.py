@@ -413,7 +413,7 @@ def lookup_prep(white_indices: torch.Tensor) -> ForwardPrep | None:
 
 def tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep: ForwardPrep,
                   slice_cols: int = DEFAULT_SLICE, vec: int = DEFAULT_VEC, P: int = DEFAULT_P,
-                  timers: dict | None = None):
+                  timers: dict | None = None, epi=None):
     """Outputs (white, black), each (B, OUT) = sum of the active weight rows + bias, original batch order.
     Columns 0..l1_size use the tiled gather, the remaining (PSQT) columns a per-list warp reduction."""
     dev = weight.device
@@ -423,7 +423,9 @@ def tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep: For
     if prep.n_lists != n_lists:
         raise RuntimeError("tiled forward: preparation does not match the batch")
     if isinstance(prep, _tp.PullPrep):
-        return _pull_forward(white_indices, black_indices, weight, bias, l1_size, prep, timers)
+        return _pull_forward(white_indices, black_indices, weight, bias, l1_size, prep, timers, epi=epi)
+    if epi is not None:
+        raise ValueError("tiled forward: the fused epilogue needs the pull gather")
     shm = shared_bytes(prep.T, slice_cols, prep.max_tile)
     if shm > MAX_SHARED_BYTES:
         raise ValueError(f"tiled forward: T={prep.T} x slice={slice_cols} with {prep.max_tile} entries per tile needs {shm} B of shared memory")
@@ -446,7 +448,7 @@ def tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep: For
     return out_w, out_b
 
 
-def _pull_forward(white_indices, black_indices, weight, bias, l1_size, prep, timers=None):
+def _pull_forward(white_indices, black_indices, weight, bias, l1_size, prep, timers=None, epi=None):
     dev = weight.device
     B, maxa = white_indices.shape
     OUT = bias.shape[0]
@@ -457,7 +459,7 @@ def _pull_forward(white_indices, black_indices, weight, bias, l1_size, prep, tim
     out_w = torch.empty(B, OUT, dtype=torch.float32, device=dev)
     out_b = torch.empty(B, OUT, dtype=torch.float32, device=dev)
     white_indices = white_indices.contiguous(); black_indices = black_indices.contiguous()
-    _tp.gather(weight, bias, l1_size, prep, out_w, out_b)
+    _tp.gather(weight, bias, l1_size, prep, out_w, out_b, epi=epi)
     _tb._mark(timers, "gather", dev)
     if OUT > l1_size:
         with _tb._cupy_stream(dev):
