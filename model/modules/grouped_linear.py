@@ -408,7 +408,7 @@ class _GroupedLinear(torch.autograd.Function):
         grad_output = grad_output.contiguous()
         # Quantized zero activations still need dense STE input gradients.
         grad_input = _input_gradient(
-            grad_output, weight, rows, counts, x.shape[1], 64, 64
+            grad_output, weight, rows, counts, x.shape[1], 128, 64
         )
         grad_weight, grad_bias = _weight_and_bias_gradient(
             x, grad_output, rows, counts, 16, 32, 32
