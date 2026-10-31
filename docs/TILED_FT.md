@@ -108,8 +108,9 @@ The loader alone delivers ~34 batches/s with 16 workers, so training stays GPU b
 ## tiled-ft-4
 
 RTX 3090 at 1500 MHz, real `train.py` + torch.compile, B = 65536, 16 loader workers, 3 epochs x 400
-steps, last epoch's it/s, arms interleaved: tiled-ft-3 24.4-24.9 it/s; this version: see the commit
-messages. Per step (nsys, after the pull forward + sort changes): main stream 98.9% busy; tiled scatter
+steps, last epoch's it/s, arms interleaved: tiled-ft-3 24.4-24.9 it/s; pull forward + high-priority
+prefetch stream 25.4; + sub-tile sort and lane-major scatter loads 26.9; + fused activation
+quantization and the faster tile sort 27.2-27.9. Per step (nsys, after the pull forward + sort changes): main stream 98.9% busy; tiled scatter
 7.6 ms, pull gather 7.3 ms (the 16-list gather took 9.3 ms in isolation on a real batch, the pull
 gather 7.0 ms), fused optimizer 6.1 ms.
 
