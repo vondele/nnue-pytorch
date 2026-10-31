@@ -97,11 +97,16 @@ def _render(src: str, **kw) -> str:
     return src
 
 
-def _get_kernel(key, src, name, dynamic_shared: int = 0):
+def _cub_options() -> tuple:
+    inc = os.path.join(os.path.dirname(cp.__file__), "_core", "include", "cupy", "_cccl")
+    return ("--std=c++17", "-I" + os.path.join(inc, "cub"), "-I" + os.path.join(inc, "libcudacxx", "include"))
+
+
+def _get_kernel(key, src, name, dynamic_shared: int = 0, options: tuple = ()):
     with _kernel_lock:
         k = _kernels.get(key)
         if k is None:
-            k = cp.RawKernel(src, name)
+            k = cp.RawKernel(src, name, options=options)
             k.compile()
             if dynamic_shared > 48 * 1024:
                 k.max_dynamic_shared_size_bytes = dynamic_shared
@@ -131,26 +136,42 @@ _HDR = "typedef int int32_t; typedef long long int64_t; typedef unsigned int uin
 # ----------------------------------------------------------------------------- kernels
 
 _ORDER_KEY_SRC = _HDR + r"""
+// One warp per list: lanes read consecutive slots (coalesced) up to the first empty slot, then the
+// warp reduces the per-lane minima / maximum / count (min, max and + are order-independent).
 extern "C" __global__ void order_key(const int32_t* __restrict__ white, const int32_t* __restrict__ black,
     const uint32_t* __restrict__ hash_a, const uint32_t* __restrict__ hash_b, int64_t* __restrict__ keys,
     int32_t* __restrict__ counts, const int32_t n_lists, const int32_t batch_size, const int32_t hk_off, const int32_t kb_first)
 {
     const int32_t MAXA = @MAXA@, NKEYS = @NKEYS@, BITS = @BITS@;
-    const int32_t li = blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t li = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const int lane = threadIdx.x & 31;
     if (li >= n_lists) return;
     const int32_t* row = @LIST_ROW@;
+    uint32_t ha[NKEYS], hb[NKEYS];
+    for (int j = 0; j < NKEYS; ++j) { ha[j] = hash_a[j]; hb[j] = hash_b[j]; }
     uint32_t mn[NKEYS]; int32_t mx = -1; int32_t n = 0;
     for (int j = 0; j < NKEYS; ++j) mn[j] = (1u << BITS) - 1;
-    for (int k = 0; k < MAXA; ++k) {
-        const int32_t r = row[k];
-        if (r < 0) break;
-        ++n;
-        mx = max(mx, r);
-        for (int j = 0; j < NKEYS; ++j) {
-            const uint32_t h = (((uint32_t)r * hash_a[j] + hash_b[j]) >> 7) & ((1u << BITS) - 1);
-            mn[j] = min(mn[j], h);
+    for (int k0 = 0; k0 < MAXA; k0 += 32) {
+        const int32_t k = k0 + lane;
+        const int32_t r = k < MAXA ? row[k] : -1;
+        const unsigned valid = __ballot_sync(0xFFFFFFFFu, r >= 0);
+        const unsigned lead = ~valid ? (((~valid) & (0u - (~valid))) - 1u) : 0xFFFFFFFFu;   // lanes before the first empty slot
+        if ((lead >> lane) & 1u) {
+            ++n;
+            mx = max(mx, r);
+            for (int j = 0; j < NKEYS; ++j) {
+                const uint32_t h = (((uint32_t)r * ha[j] + hb[j]) >> 7) & ((1u << BITS) - 1);
+                mn[j] = min(mn[j], h);
+            }
         }
+        if (lead != 0xFFFFFFFFu) break;
     }
+    for (int o = 16; o > 0; o >>= 1) {
+        n += __shfl_xor_sync(0xFFFFFFFFu, n, o);
+        mx = max(mx, __shfl_xor_sync(0xFFFFFFFFu, mx, o));
+        for (int j = 0; j < NKEYS; ++j) mn[j] = min(mn[j], __shfl_xor_sync(0xFFFFFFFFu, mn[j], o));
+    }
+    if (lane != 0) return;
     int64_t key = 0;
     if (kb_first) { int32_t kb = (mx - hk_off) / 768; kb = kb < 0 ? 0 : (kb > 127 ? 127 : kb); key = kb; }
     for (int j = 0; j < NKEYS; ++j) key = (key << BITS) | (int64_t)mn[j];
@@ -245,6 +266,45 @@ extern "C" __global__ void merge_runs(const int32_t* __restrict__ sub_start, con
     }
 }
 """
+
+
+_TILE_RSORT_SRC = r"""
+#include <cub/block/block_radix_sort.cuh>
+// Every tile's keys sorted in place by a block-wide radix sort (CUB, BS threads x IPT keys in
+// registers; tiles of n <= BS * IPT keys). Keys are unique, so the result equals any other sort.
+// Padding keys (all ones) sort after the real keys even where the low NBITS bits tie: the sort is
+// stable and the padding comes last in the blocked input.
+extern "C" __global__ void __launch_bounds__(@BS@) tile_rsort(const int* __restrict__ tile_start, unsigned* __restrict__ keys)
+{
+    typedef cub::BlockRadixSort<unsigned, @BS@, @IPT@, cub::NullType, @RB@> Sort;
+    __shared__ typename Sort::TempStorage tmp;
+    const int e0 = tile_start[blockIdx.x], n = tile_start[blockIdx.x + 1] - e0;
+    if (n <= 1) return;
+    unsigned v[@IPT@];
+#pragma unroll
+    for (int i = 0; i < @IPT@; ++i) {   // blocked: padding last
+        const int j = threadIdx.x * @IPT@ + i;
+        const unsigned k = j < n ? keys[e0 + j] : 0xFFFFFFFFu;
+        v[i] = ((k >> @LB@) << @SB@) | (k & ((1u << @SB@) - 1u));   // drop the local-index bits that are constant in the tile
+    }
+    Sort(tmp).SortBlockedToStriped(v, 0, @NBITS@);
+    const unsigned hi = keys[e0] & (((1u << @LB@) - 1u) ^ ((1u << @SB@) - 1u));
+#pragma unroll
+    for (int i = 0; i < @IPT@; ++i) {
+        const int j = i * @BS@ + threadIdx.x;
+        if (j < n) keys[e0 + j] = ((v[i] >> @SB@) << @LB@) | hi | (v[i] & ((1u << @SB@) - 1u));
+    }
+}
+"""
+RSORT_BS = int(os.environ.get("NNUE_TILED_RSORT_BS", "256"))
+RSORT_IPT = int(os.environ.get("NNUE_TILED_RSORT_IPT", "24"))
+RSORT_RB = int(os.environ.get("NNUE_TILED_RSORT_RB", "4"))
+
+
+def _tile_rsort_kernel(sub_bits: int):
+    """Sort of tiles of 2**sub_bits lists whose local list indices (LOCAL_BITS) share their high bits."""
+    src = _render(_TILE_RSORT_SRC, BS=RSORT_BS, IPT=RSORT_IPT, RB=RSORT_RB, NBITS=ROW_BITS + sub_bits, LB=LOCAL_BITS, SB=sub_bits)
+    return _get_kernel(("tile_rsort", RSORT_BS, RSORT_IPT, RSORT_RB, sub_bits), src, "tile_rsort", options=_cub_options())
 
 
 def _merge_kernel(nsub: int):
@@ -488,7 +548,7 @@ def list_order(white: torch.Tensor, black: torch.Tensor, order: str = DEFAULT_OR
     keys = torch.empty(n_lists, dtype=torch.int64, device=dev)
     counts = torch.empty(n_lists, dtype=torch.int32, device=dev)
     with _cupy_stream(dev):
-        _order_key_kernel(maxa)(grid=((n_lists + 255) // 256,), block=(256,), args=(
+        _order_key_kernel(maxa)(grid=((n_lists * 32 + 255) // 256,), block=(256,), args=(
             white.data_ptr(), black.data_ptr(), a.data_ptr(), b.data_ptr(), keys.data_ptr(), counts.data_ptr(),
             np.int32(n_lists), np.int32(B), np.int32(hk_off), np.int32(1 if order == "kb_minhash" else 0)))
     o = torch.sort(keys)[1].to(torch.int32)
@@ -557,8 +617,13 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = D
         # index differs). Same keys as the global sort; the sorted sub-tiles serve the pull forward.
         merged = torch.empty_like(keys)
         with _cupy_stream(dev):
-            _tile_sort_kernel(cap_sub)(grid=(n_lists // SUB + (n_lists % SUB > 0),), block=(512,), shared_mem=cap_sub * 4, #BS
-                                       args=(sub_start.data_ptr(), keys.data_ptr()))
+            if RSORT_BS > 0 and max_sub <= RSORT_BS * RSORT_IPT and SUB & (SUB - 1) == 0 and T % SUB == 0:
+                # a sub-tile's local list indices (p % T, 64 consecutive p) differ only in their low log2(SUB) bits
+                _tile_rsort_kernel(SUB.bit_length() - 1)(grid=(n_lists // SUB + (n_lists % SUB > 0),), block=(RSORT_BS,),
+                                                         args=(sub_start.data_ptr(), keys.data_ptr()))
+            else:
+                _tile_sort_kernel(cap_sub)(grid=(n_lists // SUB + (n_lists % SUB > 0),), block=(512,), shared_mem=cap_sub * 4, #BS
+                                           args=(sub_start.data_ptr(), keys.data_ptr()))
         _mark(timers, "subsort", dev)
         with _cupy_stream(dev):
             _merge_kernel(T // SUB)(grid=(int(sub_n.shape[0]),), block=(256,), args=(
