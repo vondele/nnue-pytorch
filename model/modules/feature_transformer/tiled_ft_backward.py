@@ -301,10 +301,41 @@ extern "C" __global__ void tiled_scatter(
 #pragma unroll
     for (int c = 0; c < CPL; ++c) acc[c] = 0.0f;
     uint32_t cur = 0xFFFFFFFFu;
+    // Same entry order, sums and flushes as a one-entry-at-a-time walk; the shared-memory loads of U
+    // entries are issued before their adds, and the next 32 keys are fetched one batch ahead.
+    const int U = 8;
+    uint32_t nextkey = (s + lane < e) ? __ldg(&e_key[s + lane]) : 0u;
     for (int32_t base = s; base < e; base += 32) {
         const int32_t nk = min(32, e - base);
-        const uint32_t mykey = (lane < nk) ? __ldg(&e_key[base + lane]) : 0u;
-        for (int j = 0; j < nk; ++j) {
+        const uint32_t mykey = nextkey;
+        nextkey = (base + 32 + lane < e) ? __ldg(&e_key[base + 32 + lane]) : 0u;
+        int j = 0;
+        for (; j + U <= nk; j += U) {
+            uint32_t key[U];
+            GV gv[U];
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                key[u] = __shfl_sync(0xFFFFFFFFu, mykey, j + u);
+                const int l = (int)(key[u] & ((1u << LOCAL_BITS) - 1));
+                gv[u] = *(const GV*)(Gsh + l * SLICE + lane * CPL);
+            }
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                const uint32_t r = key[u] >> LOCAL_BITS;
+                if (r != cur) {
+                    if (cur != 0xFFFFFFFFu) {
+                        float* gw = grad_weight + (int64_t)cur * OUT + col0 + lane;
+#pragma unroll
+                        for (int c = 0; c < CPL; ++c) { atomicAdd(gw + 32 * c, acc[c]); acc[c] = 0.0f; }
+                    }
+                    cur = r;
+                }
+                const float* g = (const float*)&gv[u];
+#pragma unroll
+                for (int c = 0; c < CPL; ++c) acc[c] += g[c];
+            }
+        }
+        for (; j < nk; ++j) {
             const uint32_t key = __shfl_sync(0xFFFFFFFFu, mykey, j);
             const uint32_t r = key >> LOCAL_BITS;
             const int l = (int)(key & ((1u << LOCAL_BITS) - 1));
