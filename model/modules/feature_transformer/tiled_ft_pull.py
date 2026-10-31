@@ -62,7 +62,7 @@ extern "C" __global__ void pull_lists(
     __syncthreads();
     for (int32_t e = e0 + l; e < e1; e += TL) {
         const int32_t r = seg_incl[e] - dr;
-        const int32_t ll = (int32_t)(e_key[e] & ((1u << LOCAL_BITS) - 1));
+        const int32_t ll = (int32_t)(e_key[e] & ((1u << LOCAL_BITS) - 1)) % TL;
         atomicAdd((unsigned int*)&sc[((r / R) * TL + ll) & ~1], ((r / R) * TL + ll) & 1 ? 65536u : 1u);
     }
     __syncthreads();
@@ -87,7 +87,7 @@ extern "C" __global__ void pull_lists(
     __syncthreads();
     for (int32_t e = e0 + l; e < e1; e += TL) {
         const int32_t r = seg_incl[e] - dr;
-        const int32_t ll = (int32_t)(e_key[e] & ((1u << LOCAL_BITS) - 1));
+        const int32_t ll = (int32_t)(e_key[e] & ((1u << LOCAL_BITS) - 1)) % TL;
         const int32_t c = r / R, i = c * TL + ll;
         const unsigned old = atomicAdd((unsigned int*)&sc[i & ~1], i & 1 ? 65536u : 1u);
         const int32_t pos = (i & 1) ? (int32_t)(old >> 16) : (int32_t)(old & 0xFFFFu);
@@ -254,7 +254,13 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, bp) -> Pul
     """From the backward's preparation ``bp`` (tiles of TL lists, row-sorted keys). None when a tile
     has more than R * MAX_CHUNKS distinct rows (the caller then uses the 16-list gather)."""
     dev = white_indices.device
-    if bp.T != TL:
+    ss = getattr(bp, "sub_sorted", None)
+    if bp.T != TL and ss is not None and ss[0] == TL:
+        # the backward's row-sorted 64-list sub-tiles (local list index still relative to the 256-list tile)
+        sub = _tb.TiledPrep(TL, bp.n_lists, bp.order, ss[1], ss[2], int(ss[1].shape[0]) - 1, bp.tile_map)
+        sub.max_tile = ss[3]
+        bp = sub
+    elif bp.T != TL:
         if bp.T % TL:
             return None
         from . import tiled_ft_forward as _tf

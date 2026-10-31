@@ -137,3 +137,15 @@ def test_pull_forward_bit_identical(B):
     ref = TF.tiled_forward(w, b, W, bias, l1, fp)
     out = TF.tiled_forward(w, b, W, bias, l1, pp)
     assert torch.equal(ref[0], out[0]) and torch.equal(ref[1], out[1])
+
+
+def test_block_sort_matches_global_sort():
+    """256-list tiles too large for one shared-memory sort: sub-tile sorts + rank merge == global sort."""
+    dev = torch.device("cuda")
+    gen = torch.Generator(device=dev).manual_seed(7)
+    w = _indices(4096, 128, 20000, gen, dev)
+    b = _indices(4096, 128, 20000, gen, dev)
+    p1 = TB.prepare(w, b, sort="block")
+    p2 = TB.prepare(w, b, sort="global")
+    assert p1.max_tile > TB.SORT_CAP_MAX and p1.sub_sorted is not None
+    assert torch.equal(p1.e_key, p2.e_key) and torch.equal(p1.tile_start, p2.tile_start)

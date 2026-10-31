@@ -225,12 +225,41 @@ extern "C" __global__ void tile_sort(const int32_t* __restrict__ tile_start, uin
 """
 
 
+_MERGE_SRC = _HDR + r"""
+// One block per sub-tile s of tile t = s / NSUB: entry i of the sorted run s goes to
+// tile_start[t] + i + (number of smaller keys in the other runs of the tile).
+extern "C" __global__ void merge_runs(const int32_t* __restrict__ sub_start, const int32_t* __restrict__ tile_start,
+    const uint32_t* __restrict__ keys, uint32_t* __restrict__ out, const int32_t n_sub)
+{
+    const int NSUB = @NSUB@;
+    const int32_t s = blockIdx.x, t = s / NSUB, s0 = t * NSUB;
+    const int32_t a = sub_start[s], n = sub_start[s + 1] - a;
+    for (int32_t i = threadIdx.x; i < n; i += blockDim.x) {
+        const uint32_t k = keys[a + i];
+        int32_t rank = i;
+        for (int r = s0; r < s0 + NSUB && r < n_sub; ++r) {
+            if (r == s) continue;
+            int32_t lo = sub_start[r], hi = sub_start[r + 1];
+            while (lo < hi) { const int32_t mid = (lo + hi) >> 1; if (keys[mid] < k) lo = mid + 1; else hi = mid; }
+            rank += lo - sub_start[r];
+        }
+        out[tile_start[t] + rank] = k;
+    }
+}
+"""
+
+
+def _merge_kernel(nsub: int):
+    return _get_kernel(("merge_runs", nsub), _render(_MERGE_SRC, NSUB=nsub), "merge_runs")
+
+
 def _tile_sort_kernel(cap: int):
     src = _render(_TILE_SORT_SRC, CAP=cap)
     return _get_kernel(("tile_sort", cap), src, "tile_sort", dynamic_shared=cap * 4)
 
 
 _SCATTER_SRC = _HDR + r"""
+#define GV @GV@
 // One block per (tile, column slice). NWARPS warps; lane owns columns col0 + lane + 32*c, c < CPL.
 extern "C" __global__ void tiled_scatter(
     const float* __restrict__ Gw, const float* __restrict__ Gb, const int32_t* __restrict__ order, const int32_t* __restrict__ tile_map,
@@ -252,14 +281,15 @@ extern "C" __global__ void tiled_scatter(
             const int32_t lid = order[li];
             v = lid < batch_size ? Gw[(int64_t)lid * OUT + col0 + c] : Gb[(int64_t)(lid - batch_size) * OUT + col0 + c];
         }
-        Gsh[idx] = v;
+        Gsh[l * SLICE + (c & 31) * CPL + (c >> 5)] = v;   // column c of the slice at lane (c % 32), slot c / 32
     }
     __syncthreads();
 
     // 2. bias gradient: column sums of the tile
     if (threadIdx.x < SLICE) {
         float s = 0.0f;
-        for (int l = 0; l < T; ++l) s += Gsh[l * SLICE + threadIdx.x];
+        const int pc = (threadIdx.x & 31) * CPL + (threadIdx.x >> 5);
+        for (int l = 0; l < T; ++l) s += Gsh[l * SLICE + pc];
         if (s != 0.0f) atomicAdd(&grad_bias[col0 + threadIdx.x], s);
     }
 
@@ -288,9 +318,10 @@ extern "C" __global__ void tiled_scatter(
                 }
                 cur = r;
             }
-            const float* g = Gsh + l * SLICE + lane;
+            const GV gv = *(const GV*)(Gsh + l * SLICE + lane * CPL);   // this lane's CPL columns in one load
+            const float* g = (const float*)&gv;
 #pragma unroll
-            for (int c = 0; c < CPL; ++c) acc[c] += g[32 * c];
+            for (int c = 0; c < CPL; ++c) acc[c] += g[c];
         }
     }
     if (cur != 0xFFFFFFFFu) {
@@ -303,7 +334,7 @@ extern "C" __global__ void tiled_scatter(
 
 
 def _scatter_kernel(T: int, slice_cols: int, l1_size: int, out_size: int, slice_fastest: bool, nwarps: int):
-    if slice_cols % 32 or slice_cols > 32 * nwarps or l1_size % slice_cols:
+    if slice_cols not in (32, 64, 128) or slice_cols > 32 * nwarps or l1_size % slice_cols:
         raise ValueError(f"slice must be a multiple of 32, at most {32 * nwarps}, and divide l1_size; got {slice_cols}")
     if nwarps not in (4, 8, 16, 32):
         raise ValueError(f"nwarps must be 4, 8, 16 or 32, got {nwarps}")
@@ -312,7 +343,8 @@ def _scatter_kernel(T: int, slice_cols: int, l1_size: int, out_size: int, slice_
         raise ValueError(f"T={T} x slice={slice_cols} needs {shm} B of shared memory > {MAX_SHARED_BYTES}")
     src = _render(_SCATTER_SRC, T=T, SLICE=slice_cols, OUT=out_size,
                   CPL=slice_cols // 32, LOCAL_BITS=LOCAL_BITS,
-                  SLICE_FASTEST=1 if slice_fastest else 0, NWARPS=nwarps)
+                  SLICE_FASTEST=1 if slice_fastest else 0, NWARPS=nwarps,
+                  GV={1: "float", 2: "float2", 4: "float4"}[slice_cols // 32])
     key = ("scatter", T, slice_cols, l1_size, out_size, slice_fastest, nwarps)
     return _get_kernel(key, src, "tiled_scatter", dynamic_shared=shm)
 
@@ -442,8 +474,12 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = D
     offsets[1:] = torch.cumsum(counts, 0)
     tile_start = torch.cat([offsets[0:n_lists:T], offsets[n_lists:]]).contiguous()
     tile_n = tile_start[1:] - tile_start[:-1]
-    E, max_tile = (int(x) for x in torch.stack([offsets[-1], tile_n.max()]).tolist())  # one host sync per batch
+    SUB = 64 if T % 64 == 0 and T > 64 else T          # sub-tiles: sorted in shared memory, then merged
+    sub_start = tile_start if SUB == T else torch.cat([offsets[0:n_lists:SUB], offsets[n_lists:]]).contiguous()
+    sub_n = sub_start[1:] - sub_start[:-1]
+    E, max_tile, max_sub = (int(x) for x in torch.stack([offsets[-1], tile_n.max(), sub_n.max()]).tolist())  # one host sync per batch
     n_entries = E
+    max_sub = max(max_sub, 1)
     E, max_tile = max(E, 1), max(max_tile, 1)
     keys = torch.empty(E, dtype=torch.int32, device=dev)
     with _cupy_stream(dev):
@@ -451,13 +487,33 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = D
             white_indices.data_ptr(), black_indices.data_ptr(), o.data_ptr(), offsets.data_ptr(), keys.data_ptr(),
             np.int32(n_lists), np.int32(B)))
     _mark(timers, "keys", dev)
-    cap = _sort_cap(T)
-    if sort == "block" and cap <= SORT_CAP_MAX and max_tile <= cap:  # T <= 128 (T=256 always uses the global sort)
+    cap = 1024
+    while cap < max_tile:     # shared-memory capacity from the actual largest tile (one bitonic sort per tile)
+        cap <<= 1
+    cap_sub = 1024
+    while cap_sub < max_sub:
+        cap_sub <<= 1
+    sub_sorted = None
+    if sort == "block" and cap <= SORT_CAP_MAX:
         with _cupy_stream(dev):
-            _tile_sort_kernel(cap)(grid=(n_tiles,), block=(512,), shared_mem=cap * 4, args=(
+            _tile_sort_kernel(cap)(grid=(n_tiles,), block=(1024,), shared_mem=cap * 4, args=(
                 tile_start.data_ptr(), keys.data_ptr()))
+    elif sort == "block" and SUB < T and cap_sub <= SORT_CAP_MAX:
+        # T = 256 tiles (~23k entries) exceed shared memory: sort the 64-list sub-tiles in shared memory,
+        # then merge every tile's T / SUB sorted runs by rank (keys are unique across runs: the local list
+        # index differs). Same keys as the global sort; the sorted sub-tiles serve the pull forward.
+        merged = torch.empty_like(keys)
+        with _cupy_stream(dev):
+            _tile_sort_kernel(cap_sub)(grid=(n_lists // SUB + (n_lists % SUB > 0),), block=(256,), shared_mem=cap_sub * 4, #BS
+                                       args=(sub_start.data_ptr(), keys.data_ptr()))
+        _mark(timers, "subsort", dev)
+        with _cupy_stream(dev):
+            _merge_kernel(T // SUB)(grid=(int(sub_n.shape[0]),), block=(256,), args=(
+                sub_start.data_ptr(), tile_start.data_ptr(), keys.data_ptr(), merged.data_ptr(), np.int32(sub_n.shape[0])))
+        sub_sorted = (SUB, sub_start, keys, max_sub)
+        keys = merged
     else:
-        if sort == "block" and cap <= SORT_CAP_MAX:
+        if sort == "block":
             STATS["global_sort_fallback"] += 1  # a tile exceeded the shared-memory capacity
         tile_of = torch.repeat_interleave(torch.arange(n_tiles, device=dev, dtype=torch.int64), tile_n.long(), output_size=n_entries)  # size known: no host sync
         full = (tile_of << 32) | (keys.to(torch.int64) & 0xFFFFFFFF)
@@ -470,6 +526,7 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = D
     prep = TiledPrep(T, n_lists, o, tile_start, keys, n_tiles, tile_map)
     prep.counts = counts       # active rows per list, in list order (int32); reusable by the tiled forward
     prep.max_tile = max_tile   # largest number of entries in one tile (the tiled forward sizes its staging with it)
+    prep.sub_sorted = sub_sorted   # (SUB, sub_start, row-sorted sub-tile keys, max entries) or None
     return prep
 
 
