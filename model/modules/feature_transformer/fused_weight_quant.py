@@ -41,8 +41,25 @@ extern "C" __global__ void merge_quant(float* __restrict__ out, const float* __r
         out[i] = rintf(x * s) * inv;
     }
 }
+
+// Same per-element math, 16 B per access. Thread j owns float4 j of the virtual weight (or of the
+// whole segment when there is none) and walks the nb buckets, so each virtual element is read once.
+extern "C" __global__ void merge_quant4(float4* __restrict__ out, const float4* __restrict__ w,
+                                        const float4* __restrict__ v, int vn4, int nb,
+                                        float s, float inv) {
+    for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < vn4; j += blockDim.x * gridDim.x) {
+        const float4 a = v != nullptr ? v[j] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        for (int b = 0; b < nb; ++b) {
+            const long long i = (long long)b * vn4 + j;
+            float4 x = w[i];
+            if (v != nullptr) { x.x = x.x + a.x; x.y = x.y + a.y; x.z = x.z + a.z; x.w = x.w + a.w; }
+            out[i] = make_float4(rintf(x.x * s) * inv, rintf(x.y * s) * inv, rintf(x.z * s) * inv, rintf(x.w * s) * inv);
+        }
+    }
+}
 """
 _kernel = None
+_kernel4 = None
 # NNUE_FUSED_WEIGHT_QUANT=0 selects the reference cat + STE chain (read once at import).
 ENABLED = os.environ.get("NNUE_FUSED_WEIGHT_QUANT", "1") != "0"
 
@@ -53,6 +70,18 @@ def _get_kernel():
         _kernel = cp.RawKernel(_SRC, "merge_quant")
         _kernel.compile()
     return _kernel
+
+
+def _get_kernel4():
+    global _kernel4
+    if _kernel4 is None:
+        _kernel4 = cp.RawKernel(_SRC, "merge_quant4")
+        _kernel4.compile()
+    return _kernel4
+
+
+def _aligned16(*ts):
+    return all(t is None or t.data_ptr() % 16 == 0 for t in ts)
 
 
 def segments_of(features):
@@ -102,9 +131,17 @@ class _MergeFakeQuant(torch.autograd.Function):
                 n = w.numel()
                 if n:
                     v = params[i + 1] if has_v else None
-                    blocks = min((n + 255) // 256, 65535 * 8)
-                    k((blocks,), (256,), (out[r0:].data_ptr(), w.data_ptr(), 0 if v is None else v.data_ptr(),
-                                          np.int64(n), np.int64(1 if v is None else v.numel()), s, inv))
+                    o = out[r0:]
+                    vn = n // _nb if v is not None else n
+                    if n % 4 == 0 and vn % 4 == 0 and vn // 4 < 2**31 and _aligned16(o, w, v):
+                        vn4 = vn // 4
+                        blocks = min((vn4 + 255) // 256, 82 * 16)
+                        _get_kernel4()((blocks,), (256,), (o.data_ptr(), w.data_ptr(), 0 if v is None else v.data_ptr(),
+                                                          np.int32(vn4), np.int32(_nb if v is not None else 1), s, inv))
+                    else:
+                        blocks = min((n + 255) // 256, 65535 * 8)
+                        k((blocks,), (256,), (o.data_ptr(), w.data_ptr(), 0 if v is None else v.data_ptr(),
+                                              np.int64(n), np.int64(1 if v is None else v.numel()), s, inv))
                 r0 += w.shape[0]
         ctx.layout = layout
         ctx.shapes = [p.shape for p in params]
