@@ -48,6 +48,7 @@ LPW = int(os.environ.get("NNUE_PULL_LPW", "8"))  # lists per warp
 NW = TL // LPW    # warps per block
 VEC = int(os.environ.get("NNUE_PULL_VEC", "4"))  # columns per lane
 SLICE = 32 * VEC  # columns per block
+BUILD_KERNEL = os.environ.get("NNUE_PULL_BUILD", "1") != "0"   # 0: torch index glue + pull_items / pull_lists
 ITEMS_KERNEL = os.environ.get("NNUE_PULL_ITEMS", "1") != "0"   # 0: the per-tile list kernel builds the items
 MAX_CHUNKS = 16384 // TL   # shared counters of the list kernel (max distinct rows per tile = R * MAX_CHUNKS)
 
@@ -216,6 +217,142 @@ extern "C" __global__ void __launch_bounds__(256) pull_items(
 }
 """
 
+_BUILD_SRC = _HDR + r"""
+// Fused pull preparation from the row-sorted tile keys (no per-entry global intermediates).
+// sub_distinct: number of distinct rows of every tile.
+extern "C" __global__ void __launch_bounds__(256) sub_distinct(const uint32_t* __restrict__ e_key,
+    const int32_t* __restrict__ tile_start, int32_t* __restrict__ nd)
+{
+    const int32_t LOCAL_BITS = @LOCAL_BITS@;
+    __shared__ int32_t s;
+    const int32_t t = blockIdx.x, e0 = tile_start[t], e1 = tile_start[t + 1];
+    if (threadIdx.x == 0) s = 0;
+    __syncthreads();
+    int32_t c = 0;
+    for (int32_t e = e0 + threadIdx.x; e < e1; e += blockDim.x)
+        c += (e == e0) || ((e_key[e] >> LOCAL_BITS) != (e_key[e - 1] >> LOCAL_BITS));
+    for (int o = 16; o > 0; o >>= 1) c += __shfl_xor_sync(0xFFFFFFFFu, c, o);
+    if ((threadIdx.x & 31) == 0) atomicAdd(&s, c);
+    __syncthreads();
+    if (threadIdx.x == 0) nd[t] = s;
+}
+
+// One block: drow_start = exclusive prefix of nd, chunk_start = exclusive prefix of ceil(nd / R) (n + 1 values each).
+extern "C" __global__ void __launch_bounds__(1024) sub_offsets(const int32_t* __restrict__ nd, const int32_t n,
+    int32_t* __restrict__ drow_start, int32_t* __restrict__ chunk_start)
+{
+    const int32_t R = @R@;
+    __shared__ int32_t wa[32], wb[32];
+    __shared__ int32_t carry_a, carry_b;
+    if (threadIdx.x == 0) { carry_a = 0; carry_b = 0; drow_start[0] = 0; chunk_start[0] = 0; }
+    __syncthreads();
+    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+    for (int32_t base = 0; base < n; base += blockDim.x) {
+        const int32_t i = base + threadIdx.x;
+        int32_t a = i < n ? nd[i] : 0;
+        int32_t b = (a + R - 1) / R;
+        for (int o = 1; o < 32; o <<= 1) {
+            const int32_t xa = __shfl_up_sync(0xFFFFFFFFu, a, o), xb = __shfl_up_sync(0xFFFFFFFFu, b, o);
+            if (lane >= o) { a += xa; b += xb; }
+        }
+        if (lane == 31) { wa[w] = a; wb[w] = b; }
+        __syncthreads();
+        if (w == 0) {
+            int32_t ya = wa[lane], yb = wb[lane];
+            for (int o = 1; o < 32; o <<= 1) {
+                const int32_t xa = __shfl_up_sync(0xFFFFFFFFu, ya, o), xb = __shfl_up_sync(0xFFFFFFFFu, yb, o);
+                if (lane >= o) { ya += xa; yb += xb; }
+            }
+            wa[lane] = ya; wb[lane] = yb;
+        }
+        __syncthreads();
+        const int32_t pa = carry_a + a + (w ? wa[w - 1] : 0), pb = carry_b + b + (w ? wb[w - 1] : 0);
+        if (i < n) { drow_start[i + 1] = pa; chunk_start[i + 1] = pb; }
+        __syncthreads();
+        if (threadIdx.x == blockDim.x - 1) { carry_a = pa; carry_b = pb; }
+        __syncthreads();
+    }
+}
+
+// One block (8 warps) per tile: the distinct-row rank of every entry (block scan, shared memory),
+// the tile's distinct rows, then one warp per chunk builds wstart / wn / items as pull_items does.
+extern "C" __global__ void __launch_bounds__(256) pull_build(
+    const uint32_t* __restrict__ e_key, const int32_t* __restrict__ tile_start,
+    const int32_t* __restrict__ drow_start, const int32_t* __restrict__ chunk_start,
+    int32_t* __restrict__ tile_rows, int32_t* __restrict__ wstart_g, uint8_t* __restrict__ wn_g, uint16_t* __restrict__ items_g)
+{
+    const int32_t TL = @TL@, R = @R@, LPW = @LPW@, NW = @NW@, LOCAL_BITS = @LOCAL_BITS@;
+    extern __shared__ uint16_t rk[];          // distinct-row rank of every entry of the tile
+    __shared__ uint32_t sm[8][TL];
+    __shared__ int32_t sn[8][NW];
+    __shared__ int32_t wsum[8];
+    const int lane = threadIdx.x & 31, wib = threadIdx.x >> 5;
+    const int32_t t = blockIdx.x, e0 = tile_start[t], n = tile_start[t + 1] - e0;
+    const int32_t d0 = drow_start[t], c0 = chunk_start[t], nch = chunk_start[t + 1] - c0;
+    // contiguous segment per thread: count, block exclusive scan, then ranks and distinct rows
+    const int32_t ch = (n + 255) / 256, i0 = min(threadIdx.x * ch, n), i1 = min(i0 + ch, n);
+    int32_t cnt = 0;
+    uint32_t prev = i0 > 0 ? (e_key[e0 + i0 - 1] >> LOCAL_BITS) : 0xFFFFFFFFu;
+    for (int32_t i = i0; i < i1; ++i) { const uint32_t r = e_key[e0 + i] >> LOCAL_BITS; cnt += (i == 0) || (r != prev); prev = r; }
+    int32_t x = cnt;
+    for (int o = 1; o < 32; o <<= 1) { const int32_t y = __shfl_up_sync(0xFFFFFFFFu, x, o); if (lane >= o) x += y; }
+    if (lane == 31) wsum[wib] = x;
+    __syncthreads();
+    int32_t before = x - cnt;
+    for (int w = 0; w < wib; ++w) before += wsum[w];
+    prev = i0 > 0 ? (e_key[e0 + i0 - 1] >> LOCAL_BITS) : 0xFFFFFFFFu;
+    int32_t rank = before - 1;
+    for (int32_t i = i0; i < i1; ++i) {
+        const uint32_t r = e_key[e0 + i] >> LOCAL_BITS;
+        if ((i == 0) || (r != prev)) { ++rank; tile_rows[d0 + rank] = (int32_t)r; }
+        rk[i] = (uint16_t)rank;
+        prev = r;
+    }
+    __syncthreads();
+    for (int32_t c = wib; c < nch; c += 8) {
+        for (int i = lane; i < TL; i += 32) sm[wib][i] = 0u;
+        if (lane < NW) sn[wib][lane] = 0;
+        int32_t bnd[2];
+#pragma unroll
+        for (int q = 0; q < 2; ++q) {             // first entry with rank >= (c + q) * R
+            const int32_t target = (c + q) * R;
+            int32_t a = 0, b = n;
+            if (q == 1 && c + 1 == nch) a = n;
+            while (a < b) { const int32_t m = (a + b) >> 1; if ((int32_t)rk[m] >= target) b = m; else a = m + 1; }
+            bnd[q] = a;
+        }
+        __syncwarp();
+        for (int32_t i = bnd[0] + lane; i < bnd[1]; i += 32) {
+            const int32_t rr = (int32_t)rk[i] - c * R;
+            const int32_t ll = (int32_t)(e_key[e0 + i] & ((1u << LOCAL_BITS) - 1)) % TL;
+            atomicOr(&sm[wib][ll], 1u << rr);
+            atomicAdd(&sn[wib][ll / LPW], 1);
+        }
+        __syncwarp();
+        if (lane < NW) {
+            int32_t ws = e0 + bnd[0];
+            for (int w = 0; w < lane; ++w) ws += sn[wib][w];
+            uint32_t m[LPW]; uint32_t u = 0u;
+#pragma unroll
+            for (int j = 0; j < LPW; ++j) { m[j] = sm[wib][lane * LPW + j]; u |= m[j]; }
+            const int64_t g = (int64_t)(c0 + c);
+            wstart_g[g * NW + lane] = ws;
+            int32_t k = 0;
+            while (u) {
+                const int32_t r = __ffs(u) - 1;
+                u &= u - 1;
+                uint32_t mk = 0u;
+#pragma unroll
+                for (int j = 0; j < LPW; ++j) mk |= ((m[j] >> r) & 1u) << j;
+                items_g[ws + k++] = (uint16_t)(r | (mk << 8));
+            }
+            wn_g[g * NW + lane] = (uint8_t)k;
+        }
+        __syncwarp();
+    }
+}
+"""
+
 _PULL_SRC = _HDR + r"""
 __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, int src_bytes) {
     const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
@@ -346,6 +483,13 @@ def _items_kernel():
     return _tb._get_kernel(("pull_items", TL, R, LPW), src, "pull_items")
 
 
+def _build_kernels(cap: int):
+    src = _tb._render(_BUILD_SRC, TL=TL, R=R, LPW=LPW, NW=NW, LOCAL_BITS=_tb.LOCAL_BITS)
+    key = ("pull_build", TL, R, LPW)
+    return (_tb._get_kernel(key + ("d",), src, "sub_distinct"), _tb._get_kernel(key + ("o",), src, "sub_offsets"),
+            _tb._get_kernel(key + ("b", cap), src, "pull_build", dynamic_shared=cap * 2))
+
+
 def _pull_kernel(out_size: int):
     src = _tb._render(_PULL_SRC, TL=TL, R=R, LPW=LPW, NW=NW, SLICE=SLICE, OUT=out_size, NS=NS, VT={2: "float2", 4: "float4"}[VEC], MINB=MINB, UNROLL=int(os.environ.get("NNUE_PULL_UNROLL", "4")))
     shm = NS * R * SLICE * 4
@@ -396,6 +540,27 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, bp) -> Pul
     E = int(bp.e_key.shape[0])
     if bp.max_tile > R * MAX_CHUNKS:      # distinct rows of a tile <= its entries (max_tile: no extra host sync)
         return None
+    if BUILD_KERNEL and NW <= 8 and R <= 32 and bp.max_tile * 2 <= _tb.MAX_SHARED_BYTES - 16384:
+        # fused: distinct rows per tile -> offsets (one block) -> ranks, distinct rows and items per tile
+        n_chunks = E // R + bp.n_tiles                                    # upper bound of sum(ceil(nd / R))
+        cap = 4096
+        while cap < bp.max_tile:
+            cap += 4096
+        k_d, k_o, k_b = _build_kernels(cap)
+        nd = torch.empty(bp.n_tiles, dtype=torch.int32, device=dev)
+        drow_start = torch.empty(bp.n_tiles + 1, dtype=torch.int32, device=dev)
+        chunk_start = torch.empty(bp.n_tiles + 1, dtype=torch.int32, device=dev)
+        tile_rows = torch.empty(max(E, 1), dtype=torch.int32, device=dev)
+        wstart = torch.empty(max(n_chunks, 1) * NW, dtype=torch.int32, device=dev)
+        wn = torch.empty(max(n_chunks, 1) * NW, dtype=torch.uint8, device=dev)
+        items = torch.zeros(E + 64, dtype=torch.int16, device=dev)        # padded: the gather reads 32 items past a warp start
+        with _tb._cupy_stream(dev):
+            k_d(grid=(bp.n_tiles,), block=(256,), args=(bp.e_key.data_ptr(), bp.tile_start.data_ptr(), nd.data_ptr()))
+            k_o(grid=(1,), block=(1024,), args=(nd.data_ptr(), np.int32(bp.n_tiles), drow_start.data_ptr(), chunk_start.data_ptr()))
+            k_b(grid=(bp.n_tiles,), block=(256,), shared_mem=bp.max_tile * 2, args=(
+                bp.e_key.data_ptr(), bp.tile_start.data_ptr(), drow_start.data_ptr(), chunk_start.data_ptr(),
+                tile_rows.data_ptr(), wstart.data_ptr(), wn.data_ptr(), items.data_ptr()))
+        return PullPrep(bp.n_lists, bp.n_tiles, bp.order, tile_rows, drow_start, chunk_start, None, wstart, None, wn, items)
     # no host syncs below: sizes use upper bounds, masks are replaced by scatters
     rows = bp.e_key >> _tb.LOCAL_BITS
     starts = torch.zeros(E + 1, dtype=torch.bool, device=dev)

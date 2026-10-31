@@ -296,6 +296,7 @@ extern "C" __global__ void __launch_bounds__(@BS@) tile_rsort(const int* __restr
     }
 }
 """
+MERGE_SHARED = os.environ.get("NNUE_TILED_MERGE_SH", "1") != "0"
 RSORT_BS = int(os.environ.get("NNUE_TILED_RSORT_BS", "256"))
 RSORT_IPT = int(os.environ.get("NNUE_TILED_RSORT_IPT", "24"))
 RSORT_RB = int(os.environ.get("NNUE_TILED_RSORT_RB", "4"))
@@ -305,6 +306,40 @@ def _tile_rsort_kernel(sub_bits: int):
     """Sort of tiles of 2**sub_bits lists whose local list indices (LOCAL_BITS) share their high bits."""
     src = _render(_TILE_RSORT_SRC, BS=RSORT_BS, IPT=RSORT_IPT, RB=RSORT_RB, NBITS=ROW_BITS + sub_bits, LB=LOCAL_BITS, SB=sub_bits)
     return _get_kernel(("tile_rsort", RSORT_BS, RSORT_IPT, RSORT_RB, sub_bits), src, "tile_rsort", options=_cub_options())
+
+
+_MERGE_SH_SRC = _HDR + r"""
+// One block per tile: the tile's NSUB sorted runs are loaded into shared memory, and entry i of run s
+// goes to tile_start[t] + (i - start of s) + (number of smaller keys in the other runs).
+extern "C" __global__ void __launch_bounds__(1024) merge_runs_sh(const int32_t* __restrict__ sub_start,
+    const int32_t* __restrict__ tile_start, const uint32_t* __restrict__ keys, uint32_t* __restrict__ out, const int32_t n_sub)
+{
+    extern __shared__ uint32_t sk[];
+    const int NSUB = @NSUB@;
+    const int32_t t = blockIdx.x, e0 = tile_start[t], n = tile_start[t + 1] - e0;
+    int32_t rs[NSUB + 1];
+#pragma unroll
+    for (int r = 0; r <= NSUB; ++r) rs[r] = sub_start[min(t * NSUB + r, n_sub)] - e0;
+    for (int32_t i = threadIdx.x; i < n; i += blockDim.x) sk[i] = keys[e0 + i];
+    __syncthreads();
+    for (int32_t i = threadIdx.x; i < n; i += blockDim.x) {
+        const uint32_t k = sk[i];
+        int32_t rank = 0;
+#pragma unroll
+        for (int r = 0; r < NSUB; ++r) {
+            if (i >= rs[r] && i < rs[r + 1]) { rank += i - rs[r]; continue; }
+            int32_t lo = rs[r], hi = rs[r + 1];
+            while (lo < hi) { const int32_t mid = (lo + hi) >> 1; if (sk[mid] < k) lo = mid + 1; else hi = mid; }
+            rank += lo - rs[r];
+        }
+        out[e0 + rank] = k;
+    }
+}
+"""
+
+
+def _merge_sh_kernel(nsub: int, cap: int):
+    return _get_kernel(("merge_runs_sh", nsub, cap), _render(_MERGE_SH_SRC, NSUB=nsub), "merge_runs_sh", dynamic_shared=cap * 4)
 
 
 def _merge_kernel(nsub: int):
@@ -626,8 +661,15 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = D
                                            args=(sub_start.data_ptr(), keys.data_ptr()))
         _mark(timers, "subsort", dev)
         with _cupy_stream(dev):
-            _merge_kernel(T // SUB)(grid=(int(sub_n.shape[0]),), block=(256,), args=(
-                sub_start.data_ptr(), tile_start.data_ptr(), keys.data_ptr(), merged.data_ptr(), np.int32(sub_n.shape[0])))
+            if max_tile * 4 <= MAX_SHARED_BYTES and MERGE_SHARED:
+                mcap = 4096
+                while mcap < max_tile:
+                    mcap += 4096
+                _merge_sh_kernel(T // SUB, mcap)(grid=(n_tiles,), block=(1024,), shared_mem=max_tile * 4, args=(
+                    sub_start.data_ptr(), tile_start.data_ptr(), keys.data_ptr(), merged.data_ptr(), np.int32(sub_n.shape[0])))
+            else:
+                _merge_kernel(T // SUB)(grid=(int(sub_n.shape[0]),), block=(256,), args=(
+                    sub_start.data_ptr(), tile_start.data_ptr(), keys.data_ptr(), merged.data_ptr(), np.int32(sub_n.shape[0])))
         sub_sorted = (SUB, sub_start, keys, max_sub)
         keys = merged
     else:
