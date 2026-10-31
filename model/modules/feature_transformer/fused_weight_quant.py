@@ -163,9 +163,59 @@ class _MergeFakeQuant(torch.autograd.Function):
                 _grf.register(g, flags[r0:r0 + nr])
             if has_v:
                 vs = ctx.shapes[i + 1]
-                grads[i + 1] = g.view(nb, vs[0], *vs[1:]).sum(0)
+                fl = None if flags is None else flags[r0:r0 + nr]
+                grads[i + 1] = _bucket_sum(g, fl, nb, vs) if fl is not None else g.view(nb, vs[0], *vs[1:]).sum(0)
             r0 += nr
         return (None, None, *grads)
+
+
+# Virtual-weight gradient: the sum over the buckets, in the order of PyTorch's reduction (4 accumulators,
+# bucket b into accumulator b % 4, then ((a0 + a1) + a2) + a3), reading only the flagged rows: an unflagged
+# row is exactly +0, and adding +0 changes no sum (no partial sum is -0: the gradient has no -0 entries).
+_BSUM_SRC = r"""
+extern "C" __global__ void bucket_sum(const float4* __restrict__ g, const unsigned char* __restrict__ flags,
+                                      float4* __restrict__ out, const int nb, const int rows, const int cols4)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long long)rows * cols4) return;
+    const int r = (int)(t / cols4), c = (int)(t - (long long)r * cols4);
+    float4 a[4];
+    bool has[4] = {false, false, false, false};
+    for (int b = 0; b < nb; ++b) {
+        if (!flags[(long long)b * rows + r]) continue;
+        const float4 v = g[((long long)b * rows + r) * cols4 + c];
+        const int k = b & 3;
+        if (has[k]) { a[k].x += v.x; a[k].y += v.y; a[k].z += v.z; a[k].w += v.w; } else { a[k] = v; has[k] = true; }
+    }
+    float4 s = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    bool any = false;
+    for (int k = 0; k < 4; ++k) {
+        if (!has[k]) continue;
+        if (any) { s.x += a[k].x; s.y += a[k].y; s.z += a[k].z; s.w += a[k].w; } else { s = a[k]; any = true; }
+    }
+    out[t] = s;
+}
+"""
+_bsum_kernel = None
+BUCKET_SUM = os.environ.get("NNUE_BUCKET_SUM_KERNEL", "1") != "0"
+
+
+def _bucket_sum(g, flags, nb, vs):
+    """g.view(nb, *vs).sum(0) for a contiguous fp32 g whose unflagged rows are +0 (bit-identical)."""
+    global _bsum_kernel
+    cols = int(np.prod(vs[1:])) if len(vs) > 1 else 1
+    rows = vs[0]
+    if not (BUCKET_SUM and _HAS_CUPY and g.is_cuda and g.dtype == torch.float32 and g.is_contiguous()
+            and cols % 4 == 0 and g.data_ptr() % 16 == 0 and flags.dtype == torch.uint8 and flags.numel() == nb * rows):
+        return g.view(nb, *vs).sum(0)
+    if _bsum_kernel is None:
+        _bsum_kernel = cp.RawKernel(_BSUM_SRC, "bucket_sum")
+    out = torch.empty(*vs, dtype=torch.float32, device=g.device)
+    n = rows * (cols // 4)
+    with _tb._cupy_stream(g.device):
+        _bsum_kernel(((n + 255) // 256,), (256,), (g.data_ptr(), flags.data_ptr(), out.data_ptr(), np.int32(nb),
+                                                   np.int32(rows), np.int32(cols // 4)))
+    return out
 
 
 def _iter_layout(layout):
