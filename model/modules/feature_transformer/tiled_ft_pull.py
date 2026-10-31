@@ -19,7 +19,16 @@ Preparation (index-only, prefetch stream, from the backward's preparation):
   ``cnt``        (n_chunks, TL) uint8: entries of list l in chunk c;
   ``wstart``     (n_chunks, NW) int32: first entry of warp w in chunk c (entries are chunk-major,
                  then list, then row);
-  ``ent``        (E,) uint8: row of the entry inside its chunk.
+  ``ent``        (E,) uint8: row of the entry inside its chunk;
+  ``items``      (E,) int16: per (chunk, warp), from the warp's first entry on, the distinct rows its
+                 LPW lists use, ascending, as row | (mask of the lists using it) << 8; ``wn`` (n_chunks,
+                 NW) uint8: number of items.
+
+The gather reads each item's staged row from shared memory once and adds it to every list of the warp
+whose mask bit is set (UNROLL items' loads issued before their adds), so a row shared by several lists
+of a warp costs one shared-memory load, and the per-chunk work needs no prefix scans. Each list still
+adds its rows in ascending order (bit-identical). LPW = 8 lists per warp, 8 warps, register cap for 3
+blocks per SM (MINB).
 """
 from __future__ import annotations
 
@@ -33,8 +42,9 @@ from . import tiled_ft_backward as _tb
 import os
 TL = int(os.environ.get("NNUE_PULL_TL", "64"))  # lists per tile (divides the backward's tile)
 NS = int(os.environ.get("NNUE_PULL_NS", "2"))   # cp.async pipeline stages
+MINB = int(os.environ.get("NNUE_PULL_MINB", "3"))   # min resident blocks per SM (register cap)
 R = int(os.environ.get("NNUE_PULL_R", "32"))            # staged rows per chunk (entries store the row inside the chunk as uint8)
-LPW = int(os.environ.get("NNUE_PULL_LPW", "4"))  # lists per warp
+LPW = int(os.environ.get("NNUE_PULL_LPW", "8"))  # lists per warp
 NW = TL // LPW    # warps per block
 VEC = int(os.environ.get("NNUE_PULL_VEC", "4"))  # columns per lane
 SLICE = 32 * VEC  # columns per block
@@ -49,7 +59,8 @@ _LISTS_SRC = _HDR + r"""
 extern "C" __global__ void pull_lists(
     const uint32_t* __restrict__ e_key, const int32_t* __restrict__ seg_incl, const int32_t* __restrict__ tile_start,
     const int32_t* __restrict__ drow_start, const int32_t* __restrict__ chunk_start,
-    uint8_t* __restrict__ cnt_g, int32_t* __restrict__ wstart_g, uint8_t* __restrict__ ent_g)
+    uint8_t* __restrict__ cnt_g, int32_t* __restrict__ wstart_g, uint8_t* __restrict__ ent_g,
+    uint8_t* __restrict__ wn_g, uint16_t* __restrict__ items_g)
 {
     const int32_t TL = @TL@, R = @R@, LPW = @LPW@, NW = @NW@, MAXC = @MAXC@, LOCAL_BITS = @LOCAL_BITS@;
     __shared__ __align__(16) uint16_t sc[MAXC * TL];
@@ -105,6 +116,36 @@ extern "C" __global__ void pull_lists(
             bk[j] = v;
         }
     }
+    __syncthreads();
+    // per (chunk, warp): the rows its LPW lists use, ascending, each with the mask of the lists that use it
+    // (row | mask << 8), written from the warp's first entry on (items <= entries); wn = number of items
+    {
+        for (int p = l; p < nch * NW; p += TL) {
+            const int c = p / NW, w = p - c * NW;
+            const int64_t g = (int64_t)(c0 + c);
+            uint32_t m[LPW];
+            uint32_t u = 0u;
+#pragma unroll
+            for (int j = 0; j < LPW; ++j) {
+                const int32_t ll = w * LPW + j, n = cnt_g[g * TL + ll];
+                const uint8_t* bk = ent_g + e0 + sc[c * TL + ll] - n;
+                uint32_t mm = 0u;
+                for (int i = 0; i < n; ++i) mm |= 1u << bk[i];
+                m[j] = mm; u |= mm;
+            }
+            const int32_t ws = wstart_g[g * NW + w];
+            int32_t k = 0;
+            while (u) {
+                const int32_t r = __ffs(u) - 1;
+                u &= u - 1;
+                uint32_t mk = 0u;
+#pragma unroll
+                for (int j = 0; j < LPW; ++j) mk |= ((m[j] >> r) & 1u) << j;
+                items_g[ws + k++] = (uint16_t)(r | (mk << 8));
+            }
+            wn_g[g * NW + w] = (uint8_t)k;
+        }
+    }
 }
 """
 
@@ -117,12 +158,13 @@ __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commi
 template <int N> __device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
 
 #define VT @VT@
+#define UNROLL @UNROLL@
 __device__ __forceinline__ float2 vadd(float2 a, float2 b) { return make_float2(a.x + b.x, a.y + b.y); }
 __device__ __forceinline__ float4 vadd(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
-extern "C" __global__ void __launch_bounds__(@NW@ * 32) pull_gather(
+extern "C" __global__ void __launch_bounds__(@NW@ * 32, @MINB@) pull_gather(
     const float* __restrict__ weight, const float* __restrict__ bias, const int32_t* __restrict__ order,
     const int32_t* __restrict__ tile_rows, const int32_t* __restrict__ drow_start, const int32_t* __restrict__ chunk_start,
-    const uint8_t* __restrict__ cnt_g, const int32_t* __restrict__ wstart_g, const uint8_t* __restrict__ ent_g,
+    const uint8_t* __restrict__ wn_g, const int32_t* __restrict__ wstart_g, const uint16_t* __restrict__ items_g,
     float* __restrict__ out_w, float* __restrict__ out_b, const int32_t n_lists, const int32_t batch_size)
 {
     const int32_t TL = @TL@, R = @R@, LPW = @LPW@, NW = @NW@, SLICE = @SLICE@, OUT = @OUT@, VEC = SLICE / 32;
@@ -161,11 +203,11 @@ extern "C" __global__ void __launch_bounds__(@NW@ * 32) pull_gather(
     for (int s = 0; s < NS - 1; ++s) { load_rows(s); stage(s); }
     load_rows(NS - 1);
     const int32_t clast = c0 + (nch > 0 ? nch - 1 : 0);
-    const int32_t mlane = warp * LPW + (lane % LPW);
+    // items of (chunk c, this warp): lane k holds item k (a chunk has at most R = 32 distinct rows)
     int32_t ws = __ldg(&wstart_g[(int64_t)c0 * NW + warp]);
     int32_t ws_n = __ldg(&wstart_g[(int64_t)min(c0 + 1, clast) * NW + warp]);
-    int32_t cn = (int32_t)__ldg(&cnt_g[(int64_t)c0 * TL + mlane]);
-    int32_t ent = (int32_t)__ldg(&ent_g[ws + lane]);
+    int32_t n = (int32_t)__ldg(&wn_g[(int64_t)c0 * NW + warp]);
+    int32_t item = (int32_t)__ldg(&items_g[ws + lane]);
     for (int32_t c = 0; c < nch; ++c) {
         const int buf = c % NS;
         cp_async_wait<NS - 2>();
@@ -174,39 +216,45 @@ extern "C" __global__ void __launch_bounds__(@NW@ * 32) pull_gather(
         load_rows(c + NS);
         // metadata of chunk c + 1 (and the warp start of c + 2) while chunk c is processed
         const int32_t gn = min(c0 + c + 1, clast);
-        const int32_t cn_n = (int32_t)__ldg(&cnt_g[(int64_t)gn * TL + mlane]);
-        const int32_t ent_n = (int32_t)__ldg(&ent_g[ws_n + lane]);
+        const int32_t n_n = (int32_t)__ldg(&wn_g[(int64_t)gn * NW + warp]);
+        const int32_t item_n = (int32_t)__ldg(&items_g[ws_n + lane]);
         const int32_t ws_nn = __ldg(&wstart_g[(int64_t)min(c0 + c + 2, clast) * NW + warp]);
-        // exclusive prefix of the counts of this warp's lists (lanes 0..LPW-1)
-        int32_t pre = (lane < LPW) ? cn : 0;
-#pragma unroll
-        for (int o = 1; o < LPW; o <<= 1) { const int32_t v = __shfl_up_sync(0xFFFFFFFFu, pre, o); if (lane >= o) pre += v; }
-        pre -= (lane < LPW) ? cn : 0;
+        // every staged row the warp uses is read from shared memory once and added to each of its lists
+        // that uses it; every list adds its rows in ascending order
         const float* wb = wsh_dyn + buf * (R * SLICE) + VEC * lane;
+        int32_t k = 0;
+#if UNROLL >= 4
+        for (; k + 3 < n; k += 4) {
+            int32_t it[4]; VT v[4];
 #pragma unroll
-        for (int j = 0; j < LPW; ++j) {
-            const int32_t nj = __shfl_sync(0xFFFFFFFFu, cn, j);
-            const int32_t oj = __shfl_sync(0xFFFFFFFFu, pre, j);
-            int32_t k = 0;
-            for (; k + 1 < nj; k += 2) {
-                const int32_t i0 = oj + k, i1 = i0 + 1;
-                int32_t r0 = __shfl_sync(0xFFFFFFFFu, ent, i0 & 31);
-                int32_t r1 = __shfl_sync(0xFFFFFFFFu, ent, i1 & 31);
-                if (i1 >= 32) { if (i0 >= 32) r0 = (int32_t)__ldg(&ent_g[ws + i0]); r1 = (int32_t)__ldg(&ent_g[ws + i1]); }
-                const VT v0 = *(const VT*)(wb + r0 * SLICE);
-                const VT v1 = *(const VT*)(wb + r1 * SLICE);
-                acc[j] = vadd(acc[j], v0);
-                acc[j] = vadd(acc[j], v1);
-            }
-            if (k < nj) {
-                const int32_t i0 = oj + k;
-                int32_t r0 = __shfl_sync(0xFFFFFFFFu, ent, i0 & 31);
-                if (i0 >= 32) r0 = (int32_t)__ldg(&ent_g[ws + i0]);
-                const VT v0 = *(const VT*)(wb + r0 * SLICE);
-                acc[j] = vadd(acc[j], v0);
+            for (int q = 0; q < 4; ++q) it[q] = __shfl_sync(0xFFFFFFFFu, item, k + q);
+#pragma unroll
+            for (int q = 0; q < 4; ++q) v[q] = *(const VT*)(wb + (it[q] & 255) * SLICE);
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+#pragma unroll
+                for (int j = 0; j < LPW; ++j) if ((it[q] >> (8 + j)) & 1) acc[j] = vadd(acc[j], v[q]);
             }
         }
-        cn = cn_n; ent = ent_n; ws = ws_n; ws_n = ws_nn;
+#endif
+#if UNROLL >= 2
+        for (; k + 1 < n; k += 2) {
+            const int32_t it0 = __shfl_sync(0xFFFFFFFFu, item, k), it1 = __shfl_sync(0xFFFFFFFFu, item, k + 1);
+            const VT v0 = *(const VT*)(wb + (it0 & 255) * SLICE);
+            const VT v1 = *(const VT*)(wb + (it1 & 255) * SLICE);
+#pragma unroll
+            for (int j = 0; j < LPW; ++j) if ((it0 >> (8 + j)) & 1) acc[j] = vadd(acc[j], v0);
+#pragma unroll
+            for (int j = 0; j < LPW; ++j) if ((it1 >> (8 + j)) & 1) acc[j] = vadd(acc[j], v1);
+        }
+#endif
+        for (; k < n; ++k) {
+            const int32_t it = __shfl_sync(0xFFFFFFFFu, item, k);
+            const VT v = *(const VT*)(wb + (it & 255) * SLICE);
+#pragma unroll
+            for (int j = 0; j < LPW; ++j) if ((it >> (8 + j)) & 1) acc[j] = vadd(acc[j], v);
+        }
+        n = n_n; item = item_n; ws = ws_n; ws_n = ws_nn;
     }
 #pragma unroll
     for (int j = 0; j < LPW; ++j) {
@@ -227,10 +275,11 @@ def _lists_kernel():
 
 
 def _pull_kernel(out_size: int):
-    src = _tb._render(_PULL_SRC, TL=TL, R=R, LPW=LPW, NW=NW, SLICE=SLICE, OUT=out_size, NS=NS, VT={2: "float2", 4: "float4"}[VEC])
+    src = _tb._render(_PULL_SRC, TL=TL, R=R, LPW=LPW, NW=NW, SLICE=SLICE, OUT=out_size, NS=NS, VT={2: "float2", 4: "float4"}[VEC], MINB=MINB, UNROLL=int(os.environ.get("NNUE_PULL_UNROLL", "4")))
     shm = NS * R * SLICE * 4
     assert (R * SLICE // 4) % (NW * 32) == 0, "R * SLICE / 4 must be a multiple of the block size"
-    return _tb._get_kernel(("pull_gather", TL, R, LPW, SLICE, out_size, NS, VEC), src, "pull_gather", dynamic_shared=max(shm, 1))
+    assert R <= 32 and LPW <= 8, "items: one bit per staged row in a 32-bit mask, list masks in 8 bits"
+    return _tb._get_kernel(("pull_gather", TL, R, LPW, SLICE, out_size, NS, VEC, MINB, os.environ.get("NNUE_PULL_UNROLL", "4")), src, "pull_gather", dynamic_shared=max(shm, 1))
 
 
 @dataclass
@@ -244,9 +293,12 @@ class PullPrep:
     cnt: torch.Tensor
     wstart: torch.Tensor
     ent: torch.Tensor
+    wn: torch.Tensor
+    items: torch.Tensor
 
     def record_stream(self, stream):
-        for t in (self.order, self.tile_rows, self.drow_start, self.chunk_start, self.cnt, self.wstart, self.ent):
+        for t in (self.order, self.tile_rows, self.drow_start, self.chunk_start, self.cnt, self.wstart, self.ent,
+                  self.wn, self.items):
             t.record_stream(stream)
 
 
@@ -290,12 +342,14 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, bp) -> Pul
     n_chunks = E // R + bp.n_tiles                                    # upper bound of sum(ceil(nd / R))
     cnt = torch.empty(max(n_chunks, 1) * TL, dtype=torch.uint8, device=dev)
     wstart = torch.empty(max(n_chunks, 1) * NW, dtype=torch.int32, device=dev)
-    ent = torch.zeros(E + 64, dtype=torch.uint8, device=dev)          # padded: the gather reads 32 entries past a warp start
+    ent = torch.zeros(E + 64, dtype=torch.uint8, device=dev)
+    wn = torch.empty(max(n_chunks, 1) * NW, dtype=torch.uint8, device=dev)
+    items = torch.zeros(E + 64, dtype=torch.int16, device=dev)        # padded: the gather reads 32 items past a warp start
     with _tb._cupy_stream(dev):
         _lists_kernel()(grid=(bp.n_tiles,), block=(TL,), args=(
             bp.e_key.data_ptr(), seg_before.data_ptr(), bp.tile_start.data_ptr(), drow_start.data_ptr(),
-            chunk_start.data_ptr(), cnt.data_ptr(), wstart.data_ptr(), ent.data_ptr()))
-    return PullPrep(bp.n_lists, bp.n_tiles, bp.order, tile_rows, drow_start, chunk_start, cnt, wstart, ent)
+            chunk_start.data_ptr(), cnt.data_ptr(), wstart.data_ptr(), ent.data_ptr(), wn.data_ptr(), items.data_ptr()))
+    return PullPrep(bp.n_lists, bp.n_tiles, bp.order, tile_rows, drow_start, chunk_start, cnt, wstart, ent, wn, items)
 
 
 def gather(weight, bias, l1_size, prep: PullPrep, out_w, out_b):
@@ -305,5 +359,5 @@ def gather(weight, bias, l1_size, prep: PullPrep, out_w, out_b):
     with _tb._cupy_stream(weight.device):
         _pull_kernel(OUT)(grid=(prep.n_tiles, l1_size // SLICE), block=(NW * 32,), shared_mem=NS * R * SLICE * 4, args=(
             weight.data_ptr(), bias.data_ptr(), prep.order.data_ptr(), prep.tile_rows.data_ptr(), prep.drow_start.data_ptr(),
-            prep.chunk_start.data_ptr(), prep.cnt.data_ptr(), prep.wstart.data_ptr(), prep.ent.data_ptr(),
+            prep.chunk_start.data_ptr(), prep.wn.data_ptr(), prep.wstart.data_ptr(), prep.items.data_ptr(),
             out_w.data_ptr(), out_b.data_ptr(), np.int32(prep.n_lists), np.int32(B)))
