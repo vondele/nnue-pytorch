@@ -71,3 +71,20 @@ workers, model + loss + backward + fused Adam, no Lightning/torch.compile), arms
 
 *Measured while another job shared the GPU, so only the ratios are meaningful. Under the same sharing,
 65536 gave 3.24 / 4.05 / 5.5 it/s (1.70x).
+
+## Fused weight and activation fake quantization
+
+`fused_weight_quant.py` replaces two elementwise chains around the FT (`NNUE_FUSED_WEIGHT_QUANT=0`
+restores the reference chains). Both are bit-identical in forward and backward to the reference.
+
+- The merged FT weight (cat of the feature weights, virtual weight repeated over the buckets, then the
+  STE fake quantization) is written in one pass; the backward hands each weight its slice of the merged
+  gradient and sums the virtual slice over the buckets. For the default model this is a ~570 MB tensor
+  that the reference chain passed over about eight times per step.
+- `fake_quantize_ft_act(l0_) * l0_correction_factor` is one kernel (fp32 roundings as PyTorch's scalar
+  ops, no FMA contraction); its gradient is `grad * c`.
+
+RTX 3090 at 1500 MHz, default model, B = 65536, same plain loop as above: 17.5 -> 23.2 it/s (1.33x).
+Per step (42.8 ms of GPU time): tiled FT forward 10.6 ms, tiled FT backward 9.7 ms, fused Adam 5.0 ms,
+index preparation 4.8 ms (on the loader's stream, overlapped), layer stacks ~7 ms, weight merge 1.7 ms.
+The loader alone delivers ~34 batches/s with 16 workers, so training stays GPU bound.

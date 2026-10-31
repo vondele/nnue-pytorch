@@ -1,0 +1,190 @@
+"""One-pass merge + fake quantization of the feature-transformer weight.
+
+``ComposedFeatureTransformer.merged_weight_and_bias(fake_quantize_weights=True)`` builds the effective
+weight as ``cat([w, w_k + virtual.repeat(NB, 1), ...])`` and fake-quantizes it with the STE
+``hard + (x - x.detach())``. For the default model that is a ~570 MB tensor, and the chain of
+repeat / add / cat / mul / round / div / sub / add makes about eight full passes over it every step,
+plus their backward. Here one kernel writes ``round((w + v) * s) * (1 / s)`` per feature segment
+straight into the merged tensor, and the backward hands each weight its slice of the merged gradient
+(the STE gradient is the identity) and reduces the virtual weight's slice over the buckets.
+
+The result is bit-identical to the reference chain: PyTorch's CUDA ``mul``/``div`` by a Python scalar
+compute in fp32 with ``float(s)`` and ``float(1) / float(s)``, ``round`` is round-half-to-even
+(``rint``), ``x - x.detach()`` is exactly zero, and the virtual gradient is the same
+``view(NB, nv, L).sum(0)`` that ``repeat``'s backward performs.
+"""
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import torch
+
+try:
+    import cupy as cp
+
+    from . import tiled_ft_backward as _tb
+
+    _HAS_CUPY = True
+except Exception:  # noqa: BLE001 - optional
+    _HAS_CUPY = False
+
+_SRC = r"""
+extern "C" __global__ void merge_quant(float* __restrict__ out, const float* __restrict__ w,
+                                       const float* __restrict__ v, long long n, long long vn,
+                                       float s, float inv) {
+    long long stride = (long long)blockDim.x * gridDim.x;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        float x = w[i];
+        if (v != nullptr) x = x + v[i % vn];
+        out[i] = rintf(x * s) * inv;
+    }
+}
+"""
+_kernel = None
+# NNUE_FUSED_WEIGHT_QUANT=0 selects the reference cat + STE chain (read once at import).
+ENABLED = os.environ.get("NNUE_FUSED_WEIGHT_QUANT", "1") != "0"
+
+
+def _get_kernel():
+    global _kernel
+    if _kernel is None:
+        _kernel = cp.RawKernel(_SRC, "merge_quant")
+        _kernel.compile()
+    return _kernel
+
+
+def segments_of(features):
+    """[(weight, virtual_weight or None, num_buckets)] for the feature set, or None when some feature
+    merges its weight in another way (then the caller uses the reference path)."""
+    segs = []
+    for f in features:
+        w = f.weight
+        v = getattr(f, "virtual_weight", None)
+        if v is not None:
+            nb = getattr(f, "NUM_BUCKETS", None)
+            if nb is None or w.shape[0] != v.shape[0] * nb or w.shape[1:] != v.shape[1:]:
+                return None
+            segs.append((w, v, nb))
+        else:
+            if f.merged_weight() is not w:
+                return None
+            segs.append((w, None, 1))
+    return segs
+
+
+def usable(segs) -> bool:
+    return (
+        _HAS_CUPY
+        and segs is not None
+        and all(
+            w.is_cuda and w.dtype == torch.float32 and w.is_contiguous()
+            and (v is None or (v.is_cuda and v.dtype == torch.float32 and v.is_contiguous()))
+            for w, v, _ in segs
+        )
+    )
+
+
+class _MergeFakeQuant(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, scale, layout, *params):
+        s = np.float32(scale)
+        inv = np.float32(1.0) / s
+        rows = sum(params[i].shape[0] for i, (has_v, _) in _iter_layout(layout))
+        cols = params[0].shape[1]
+        out = torch.empty(rows, cols, device=params[0].device, dtype=torch.float32)
+        k = _get_kernel()
+        r0 = 0
+        with _tb._cupy_stream(out.device):
+            for i, (has_v, _nb) in _iter_layout(layout):
+                w = params[i]
+                n = w.numel()
+                if n:
+                    v = params[i + 1] if has_v else None
+                    blocks = min((n + 255) // 256, 65535 * 8)
+                    k((blocks,), (256,), (out[r0:].data_ptr(), w.data_ptr(), 0 if v is None else v.data_ptr(),
+                                          np.int64(n), np.int64(1 if v is None else v.numel()), s, inv))
+                r0 += w.shape[0]
+        ctx.layout = layout
+        ctx.shapes = [p.shape for p in params]
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        grad = grad.contiguous()
+        grads = [None] * len(ctx.shapes)
+        r0 = 0
+        for i, (has_v, nb) in _iter_layout(ctx.layout):
+            nr = ctx.shapes[i][0]
+            g = grad[r0:r0 + nr]
+            grads[i] = g
+            if has_v:
+                vs = ctx.shapes[i + 1]
+                grads[i + 1] = g.view(nb, vs[0], *vs[1:]).sum(0)
+            r0 += nr
+        return (None, None, *grads)
+
+
+def _iter_layout(layout):
+    """layout: tuple of (has_virtual, num_buckets) per feature; params are w[, v] per feature in order."""
+    i = 0
+    for has_v, nb in layout:
+        yield i, (has_v, nb)
+        i += 2 if has_v else 1
+
+
+def merge_and_fake_quantize(segs, scale):
+    layout = tuple((v is not None, nb) for _, v, nb in segs)
+    params = [p for w, v, _ in segs for p in ((w, v) if v is not None else (w,))]
+    return _MergeFakeQuant.apply(scale, layout, *params)
+
+
+# ---- FT activation: fake_quantize_ft_act(l0_) * l0_correction_factor in one pass --------------------
+# Reference: hard = x.mul(s).add(eps).floor().div(s); out = (hard + (x - x.detach())) * c. PyTorch's CUDA
+# scalar mul/add/div run in fp32 with float(s), float(eps) and float(1) / float(s) (a scalar divisor is
+# applied as a reciprocal multiply), so the kernel uses the same roundings with no FMA contraction.
+# The STE gradient is grad * c (identity when c == 1).
+_ACT_SRC = r"""
+extern "C" __global__ void act_quant(float* __restrict__ out, const float* __restrict__ x, long long n,
+                                     float s, float eps, float inv, float c) {
+    long long stride = (long long)blockDim.x * gridDim.x;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        float h = __fmul_rn(floorf(__fadd_rn(__fmul_rn(x[i], s), eps)), inv);
+        out[i] = __fmul_rn(h, c);
+    }
+}
+"""
+_act_kernel = None
+
+
+class _ActFakeQuant(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, scale, eps, corr):
+        global _act_kernel
+        if _act_kernel is None:
+            _act_kernel = cp.RawKernel(_ACT_SRC, "act_quant")
+            _act_kernel.compile()
+        x = x.contiguous()
+        out = torch.empty_like(x)
+        n = x.numel()
+        s = np.float32(scale)
+        if n:
+            with _tb._cupy_stream(x.device):
+                _act_kernel((min((n + 255) // 256, 65535 * 8),), (256,),
+                            (out.data_ptr(), x.data_ptr(), np.int64(n), s, np.float32(eps),
+                             np.float32(1.0) / s, np.float32(corr)))
+        ctx.corr = corr
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        return (grad if ctx.corr == 1.0 else grad * ctx.corr), None, None, None
+
+
+def act_usable(x: torch.Tensor) -> bool:
+    return ENABLED and _HAS_CUPY and x.is_cuda and x.dtype == torch.float32
+
+
+def fake_quantize_act_and_scale(x, scale, eps, corr):
+    return _ActFakeQuant.apply(x, scale, eps, corr)
