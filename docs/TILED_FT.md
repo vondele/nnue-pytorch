@@ -154,3 +154,42 @@ NS = 3, LPW = 2/8; a float4 optimizer kernel (+0.7%, and not bit-identical). Wri
 from the optimizer was not done: the FT weights can also be changed through `.data` (input weight
 clipping, the optimizer's lookahead path, checkpoint loading), which does not bump the version counter,
 so a merge cached by the optimizer could go stale silently.
+
+## tiled-ft-6
+
+Same setup (RTX 3090 at 1500 MHz, real `train.py` + torch.compile, B = 65536, 16 loader workers,
+3 epochs x 400 steps, last epoch's it/s, arms interleaved): tiled-ft-5 29.92-29.96 it/s (7 runs);
++ fused lookahead 30.31-30.71; + FT gradient row flags 31.15-31.17; + flagged clip norm 31.44-31.48 (7 runs, 1.05x).
+
+- **Lookahead blend in the update kernel** (`ranger_lite.py`): every 5th step `lookahead_process_step`
+  made three passes over every parameter and its lookahead copy (mul_, add_, copy_; ~0.9 ms per step on
+  average). On a merge step the fused RangerLite kernels now apply `p * alpha`, then the FMA PyTorch's
+  `add_(la, alpha=1 - alpha)` compiles to, to the new parameter and write the lookahead copy.
+  Bit-identical (torch.equal on parameters and state against the unfused path, alpha 0.5/0.3/0.8).
+  `NNUE_FUSE_LOOKAHEAD=0` disables.
+- **FT gradient row flags** (`model/optimizers/grad_row_flags.py`): about half of the FT rows get no
+  gradient in a batch, and ~25% (103.4k of 138.1k rows seen in 2000 steps) never do. The tiled scatter
+  marks the rows it adds to; the merged-weight backward registers each weight's row slice with its flags;
+  the fused update uses +0 for an unflagged row instead of reading the gradient (the gradient there is
+  exactly +0), and an element with g == 0 and all-zero optimizer state skips the parameter read and
+  all writes (its update rewrites the same bits; the host checks that the scalars keep that true).
+  A lookup matches data pointer, shape and version counter (under torch.compile the gradient reaches
+  the parameter as a regenerated alias, so object identity does not work) and holds the storage, so an
+  in-place change or a copy makes the optimizer read the gradient again. Bit-identical
+  (tests/test_fused_optimizer.py). `NNUE_GRAD_ROW_FLAGS=0` disables.
+- **Clip norm over the flagged rows** (`grad_row_flags.total_norm`): the gradient-clipping norm read
+  every gradient again (0.76 ms); a kernel now sums the squares of the flagged FT rows only (0.36 ms),
+  the other gradients use `torch._foreach_norm`. Same value up to fp32 summation order (< 1e-6
+  relative in the test). The norms in these runs are 0.006-0.012 against the clip value 2.0, so the
+  clip scale is exactly 1.0 either way. `NNUE_FLAGGED_NORM=0` restores `get_total_norm`.
+
+The training loop is no longer purely GPU bound: under nsys the main stream was 89.8% busy, and ~7 of
+35 steps waited ~16 ms each for their batch before the first forward kernel.
+
+Tried without gain: the merged FT weight written by the optimizer (a persistent merge buffer whose
+validity key is (invalidation epoch, data_ptr and version of every source weight); the fused update of
+each weight wrote `rint((p + v) * s) * inv` after the virtual weights were updated; `.data` writers
+call `invalidate()`). It was bit-identical (118 of 118 reused merges equal to a fresh merge in real
+training) and removed the 1.44 ms merge kernel, but measured 31.34-31.39 it/s against 31.44-31.45
+without it (the pull gather took ~1 ms longer in the profile, and the loop now waits on batches), so it
+was not kept.
