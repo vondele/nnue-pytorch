@@ -6,6 +6,7 @@ while keeping `model.NNUE` as a plain `torch.nn.Module`.
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Iterable
 from typing import Any
@@ -110,6 +111,10 @@ class SimpleTrainer:
         self.max_epochs = max_epochs
         self.check_val_every_n_epoch = check_val_every_n_epoch
         self.gradient_clip_val = gradient_clip_val
+        # Fold the clip coefficient into optimizers whose step() accepts it (RangerLite).
+        self._fold_clip = os.environ.get("NNUE_FOLD_CLIP", "1") != "0" and (
+            "grad_scale" in inspect.signature(optimizer.step).parameters
+        )
         self.log_every_n_steps = log_every_n_steps
         self.default_root_dir = default_root_dir or "."
         self.callbacks: list[Any] = list(callbacks) if callbacks is not None else []
@@ -341,12 +346,25 @@ class SimpleTrainer:
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
+            grad_scale = None
             if self.gradient_clip_val is not None and self.gradient_clip_val > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.gradient_clip_val
-                )
+                if self._fold_clip:
+                    # Same math as clip_grad_norm_, but the clip coefficient is handed to the
+                    # optimizer, whose fused kernels apply it while reading each gradient.
+                    grads = [p.grad for p in self.model.parameters() if p.grad is not None]
+                    total_norm = torch.nn.utils.get_total_norm(grads, 2.0)
+                    grad_scale = torch.clamp(
+                        float(self.gradient_clip_val) / (total_norm + 1e-6), max=1.0
+                    )
+                else:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.gradient_clip_val
+                    )
 
-            self.optimizer.step()
+            if grad_scale is not None:
+                self.optimizer.step(grad_scale=grad_scale)
+            else:
+                self.optimizer.step()
 
             # Step OneCycleLR-style schedulers every optimizer step.
             for sch in self._schedulers:

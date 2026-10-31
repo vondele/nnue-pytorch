@@ -46,6 +46,7 @@ typedef long long int64_t;
 extern "C" __global__ void ranger_lite_update_pnm(
     float* __restrict__ p,
     const float* __restrict__ grad,
+    const float* __restrict__ grad_scale,
     float* __restrict__ grad_ma,
     float* __restrict__ neg_grad_ma,
     float* __restrict__ variance_ma,
@@ -64,7 +65,7 @@ extern "C" __global__ void ranger_lite_update_pnm(
     float wd_factor
 ) {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
-        float g = grad[i];
+        float g = grad_scale == nullptr ? grad[i] : __fmul_rn(grad[i], *grad_scale);
         float vm = variance_ma[i] * beta2 + g * g * one_minus_beta2;
         variance_ma[i] = vm;
         float denom = sqrtf(vm / bias_correction2) + eps;
@@ -94,6 +95,7 @@ extern "C" __global__ void ranger_lite_update_pnm(
 extern "C" __global__ void ranger_lite_update_adam(
     float* __restrict__ p,
     const float* __restrict__ grad,
+    const float* __restrict__ grad_scale,
     float* __restrict__ grad_ma,
     float* __restrict__ variance_ma,
     int64_t n,
@@ -107,7 +109,7 @@ extern "C" __global__ void ranger_lite_update_adam(
     float wd_factor
 ) {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
-        float g = grad[i];
+        float g = grad_scale == nullptr ? grad[i] : __fmul_rn(grad[i], *grad_scale);
         float vm = variance_ma[i] * beta2 + g * g * one_minus_beta2;
         variance_ma[i] = vm;
         float denom = sqrtf(vm / bias_correction2) + eps;
@@ -340,7 +342,7 @@ class RangerLite(torch.optim.Optimizer):
                 return False
         return True
 
-    def _fused_update_group(self, group):
+    def _fused_update_group(self, group, grad_scale=None):
         """Apply the fused full update kernel (variance + moment + param)."""
         _RangerLiteFusedKernels._compile()
         beta1, beta2 = group["betas"]
@@ -355,6 +357,7 @@ class RangerLite(torch.optim.Optimizer):
         noise_norm = math.sqrt((1.0 + pnm_factor) ** 2 + pnm_factor**2)
 
         wd_factor = decay * lr if not self.use_stable_weight_decay else 0.0
+        scale_ptr = np.uint64(grad_scale.data_ptr() if grad_scale is not None else 0)
 
         for p in group["params"]:
             if p.grad is None:
@@ -383,6 +386,7 @@ class RangerLite(torch.optim.Optimizer):
                 args = (
                     p_arr,
                     g_arr,
+                    scale_ptr,
                     gm_arr,
                     ngm_arr,
                     vm_arr,
@@ -409,6 +413,7 @@ class RangerLite(torch.optim.Optimizer):
                 args = (
                     p_arr,
                     g_arr,
+                    scale_ptr,
                     gm_arr,
                     vm_arr,
                     np.int64(p.numel()),
@@ -475,6 +480,7 @@ class RangerLite(torch.optim.Optimizer):
                 args = (
                     p_arr,
                     g_arr,
+                    scale_ptr,
                     gm_arr,
                     ngm_arr,
                     vm_arr,
@@ -541,7 +547,10 @@ class RangerLite(torch.optim.Optimizer):
         return x.norm(dim=dim, keepdim=True, p=2.0)
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure=None, grad_scale=None):
+        """``grad_scale``: optional 0-dim float32 CUDA tensor every gradient is multiplied by first
+        (gradient clipping). The fused full-update kernels apply it while reading the gradient,
+        which saves a pass over the gradients; other paths scale the gradients in place first."""
         loss = None
         if closure is not None and isinstance(closure, collections.abc.Callable):
             with torch.enable_grad():
@@ -571,10 +580,14 @@ class RangerLite(torch.optim.Optimizer):
             all_fusable = all(self._can_fuse_group_full(g) for g in self.param_groups)
             if all_fusable:
                 for group in self.param_groups:
-                    self._fused_update_group(group)
+                    self._fused_update_group(group, grad_scale)
                 if self.lookahead_active:
                     self.lookahead_process_step()
                 return loss
+
+        if grad_scale is not None:
+            grads = [p.grad for g in self.param_groups for p in g["params"] if p.grad is not None]
+            torch._foreach_mul_(grads, grad_scale)
 
         # Fast path B: every group that has work can use the phase-2 fused kernel.
         # We run a fused variance kernel per parameter, reduce the debiased sums,

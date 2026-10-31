@@ -46,6 +46,7 @@ extern "C" __global__ void tiled_ft_epilogue(
     if (l0_b1 < 0.0f) l0_b1 = 0.0f; else if (l0_b1 > max_act) l0_b1 = max_act;
     l0_out[r + i] = l0_w0 * l0_w1;
     l0_out[r + $H + i] = l0_b0 * l0_b1;
+    if (clamped_out == nullptr) return;
     const size_t c = (size_t)b * 4 * $H;
     clamped_out[c + 0 * $H + i] = l0_w0;
     clamped_out[c + 1 * $H + i] = l0_w1;
@@ -80,6 +81,40 @@ extern "C" __global__ void tiled_ft_prologue(
 """
 
 
+_PROLOGUE_ACC_SRC = r"""
+extern "C" __global__ void tiled_ft_prologue_acc(
+    const float* __restrict__ us, const float* __restrict__ them,
+    const float* __restrict__ grad_l0, const float* __restrict__ acc_w, const float* __restrict__ acc_b,
+    const float max_act, float* __restrict__ grad_w, float* __restrict__ grad_b, const int batch_size)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long long)batch_size * $H) return;
+    const int b = (int)(t / $H), i = (int)(t % $H);
+    const float u = us[b], th = them[b];
+    const size_t r = (size_t)b * $L1;
+    // Recompute the clamped values exactly as tiled_ft_epilogue does (same expressions, same roundings).
+    const float w0 = acc_w[r + i], w1 = acc_w[r + i + $H], b0 = acc_b[r + i], b1 = acc_b[r + i + $H];
+    float cw0 = u * w0 + th * b0;
+    float cw1 = u * w1 + th * b1;
+    float cb0 = u * b0 + th * w0;
+    float cb1 = u * b1 + th * w1;
+    if (cw0 < 0.0f) cw0 = 0.0f; else if (cw0 > max_act) cw0 = max_act;
+    if (cw1 < 0.0f) cw1 = 0.0f; else if (cw1 > max_act) cw1 = max_act;
+    if (cb0 < 0.0f) cb0 = 0.0f; else if (cb0 > max_act) cb0 = max_act;
+    if (cb1 < 0.0f) cb1 = 0.0f; else if (cb1 > max_act) cb1 = max_act;
+    const float g = grad_l0[r + i], gh = grad_l0[r + $H + i];
+    const float dw0 = (cw0 == 0.0f || cw0 == max_act) ? 0.0f : g * cw1;
+    const float dw1 = (cw1 == 0.0f || cw1 == max_act) ? 0.0f : g * cw0;
+    const float db0 = (cb0 == 0.0f || cb0 == max_act) ? 0.0f : gh * cb1;
+    const float db1 = (cb1 == 0.0f || cb1 == max_act) ? 0.0f : gh * cb0;
+    grad_w[r + i] = u * dw0 + th * db0;
+    grad_w[r + $H + i] = u * dw1 + th * db1;
+    grad_b[r + i] = th * dw0 + u * db0;
+    grad_b[r + $H + i] = th * dw1 + u * db1;
+}
+"""
+
+
 def _kernel(name: str, src: str, l1_size: int):
     h = l1_size // 2
     return _tb._get_kernel((name, l1_size), src.replace("$H", str(h)).replace("$L1", str(l1_size)), name)
@@ -91,8 +126,11 @@ def _launch(kernel, batch_size: int, l1_size: int, args):
 
 
 @torch.compiler.disable(recursive=True)
-def forward(us, them, white_indices, black_indices, weight, bias, max_ft_activation, l1_size):
-    """(l0_, clamped_out) like the fused forward kernel, or None when the tiled forward does not apply."""
+def forward(us, them, white_indices, black_indices, weight, bias, max_ft_activation, l1_size, keep_acc=False):
+    """(l0_, clamped_out) like the fused forward kernel, or None when the tiled forward does not apply.
+    With ``keep_acc`` (only when the tiled backward will run) it returns (l0_, (acc_w, acc_b)) instead:
+    the backward recomputes the clamped values from the raw accumulators, which saves writing
+    ``clamped_out`` (as large as both accumulators together)."""
     if not USE_TILED_FORWARD or not _tf.applicable(l1_size, weight.shape[1]):
         return None
     prep = _tf.lookup_prep(white_indices)
@@ -102,12 +140,17 @@ def forward(us, them, white_indices, black_indices, weight, bias, max_ft_activat
     batch_size = white_indices.shape[0]
     acc_w, acc_b = _tf.tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep)
     l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
-    clamped_out = torch.empty(batch_size, 4, l1_size // 2, dtype=torch.float32, device=us.device)
+    clamped_out = None if keep_acc else torch.empty(
+        batch_size, 4, l1_size // 2, dtype=torch.float32, device=us.device)
     with _tb._cupy_stream(us.device):
         _launch(_kernel("tiled_ft_epilogue", _EPILOGUE_SRC, l1_size), batch_size, l1_size, (
             us.data_ptr(), them.data_ptr(), acc_w.data_ptr(), acc_b.data_ptr(), np.float32(max_ft_activation),
-            l0_.data_ptr(), clamped_out.data_ptr(), np.int32(batch_size)))
-    return l0_, clamped_out
+            l0_.data_ptr(), 0 if keep_acc else clamped_out.data_ptr(), np.int32(batch_size)))
+    return (l0_, (acc_w, acc_b)) if keep_acc else (l0_, clamped_out)
+
+
+def backward_will_run(l1_size: int) -> bool:
+    return USE_TILED_BACKWARD and _tb.applicable(l1_size)
 
 
 def lookup_backward_prep(white_indices):
@@ -116,15 +159,21 @@ def lookup_backward_prep(white_indices):
 
 @torch.compiler.disable(recursive=True)
 def backward(us, them, white_indices, black_indices, grad_l0, clamped_out, num_inputs, max_ft_activation,
-             l1_size, prep=None):
-    """(grad_weight, grad_bias) of the fused double FT, or None when the tiled backward does not apply."""
+             l1_size, prep=None, acc=None):
+    """(grad_weight, grad_bias) of the fused double FT, or None when the tiled backward does not apply.
+    ``acc`` = (acc_w, acc_b) from ``forward(keep_acc=True)`` replaces ``clamped_out``."""
     if not USE_TILED_BACKWARD or not _tb.applicable(l1_size):
         return None
     batch_size = white_indices.shape[0]
     grad_w = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
     grad_b = torch.empty_like(grad_w)
     with _tb._cupy_stream(us.device):
-        _launch(_kernel("tiled_ft_prologue", _PROLOGUE_SRC, l1_size), batch_size, l1_size, (
-            us.data_ptr(), them.data_ptr(), grad_l0.data_ptr(), clamped_out.data_ptr(), np.float32(max_ft_activation),
-            grad_w.data_ptr(), grad_b.data_ptr(), np.int32(batch_size)))
+        if acc is not None:
+            _launch(_kernel("tiled_ft_prologue_acc", _PROLOGUE_ACC_SRC, l1_size), batch_size, l1_size, (
+                us.data_ptr(), them.data_ptr(), grad_l0.data_ptr(), acc[0].data_ptr(), acc[1].data_ptr(),
+                np.float32(max_ft_activation), grad_w.data_ptr(), grad_b.data_ptr(), np.int32(batch_size)))
+        else:
+            _launch(_kernel("tiled_ft_prologue", _PROLOGUE_SRC, l1_size), batch_size, l1_size, (
+                us.data_ptr(), them.data_ptr(), grad_l0.data_ptr(), clamped_out.data_ptr(), np.float32(max_ft_activation),
+                grad_w.data_ptr(), grad_b.data_ptr(), np.int32(batch_size)))
     return _tb.tiled_backward(white_indices, black_indices, grad_w, grad_b, num_inputs, l1_size, prep=prep)

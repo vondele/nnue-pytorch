@@ -113,10 +113,11 @@ class FusedDoubleFtFunction(autograd.Function):
         max_active_features = white_indices.shape[1]
         l1_half = l1_size // 2
 
+        keep_acc = _tiled_ft is not None and _tiled_ft.backward_will_run(l1_size)
         tiled = (
             _tiled_ft.forward(
                 us, them, white_indices, black_indices, weight, bias,
-                max_ft_activation, l1_size,
+                max_ft_activation, l1_size, keep_acc=keep_acc,
             )
             if _tiled_ft is not None
             else None
@@ -124,8 +125,11 @@ class FusedDoubleFtFunction(autograd.Function):
         ctx.tiled_bwd_prep = (
             _tiled_ft.lookup_backward_prep(white_indices) if _tiled_ft is not None else None
         )
+        acc_b = None
         if tiled is not None:
             l0_, clamped_out = tiled
+            if keep_acc:  # (acc_w, acc_b): the tiled backward recomputes the clamped values
+                clamped_out, acc_b = clamped_out
         else:
             l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
             clamped_out = torch.empty(
@@ -149,14 +153,16 @@ class FusedDoubleFtFunction(autograd.Function):
                     np.int32(output_size),
                 ),
             )
+        ctx.has_acc = acc_b is not None
         ctx.save_for_backward(
-            us, them, white_indices, black_indices, weight, bias, clamped_out
+            us, them, white_indices, black_indices, weight, bias, clamped_out,
+            *((acc_b,) if acc_b is not None else ()),
         )
         return l0_
 
     @staticmethod
     def backward(ctx, grad_l0):
-        us, them, white_indices, black_indices, weight, bias, clamped_out = (
+        us, them, white_indices, black_indices, weight, bias, clamped_out, *acc_b = (
             ctx.saved_tensors
         )
         max_ft_activation = ctx.max_ft_activation
@@ -168,6 +174,7 @@ class FusedDoubleFtFunction(autograd.Function):
             tiled = _tiled_ft.backward(
                 us, them, white_indices, black_indices, grad_l0, clamped_out,
                 weight.shape[0], max_ft_activation, l1_size, prep=prep,
+                acc=(clamped_out, acc_b[0]) if ctx.has_acc else None,
             )
             if tiled is not None:
                 return None, None, None, None, *tiled, None, None
