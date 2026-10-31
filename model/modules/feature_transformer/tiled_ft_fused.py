@@ -28,7 +28,8 @@ _EPILOGUE_SRC = r"""
 extern "C" __global__ void tiled_ft_epilogue(
     const float* __restrict__ us, const float* __restrict__ them,
     const float* __restrict__ acc_w, const float* __restrict__ acc_b, const float max_act,
-    float* __restrict__ l0_out, float* __restrict__ clamped_out, const int batch_size)
+    float* __restrict__ l0_out, float* __restrict__ clamped_out, const int batch_size,
+    const int act_q, const float act_s, const float act_eps, const float act_inv, const float act_c)
 {
     const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= (long long)batch_size * $H) return;
@@ -44,8 +45,13 @@ extern "C" __global__ void tiled_ft_epilogue(
     if (l0_w1 < 0.0f) l0_w1 = 0.0f; else if (l0_w1 > max_act) l0_w1 = max_act;
     if (l0_b0 < 0.0f) l0_b0 = 0.0f; else if (l0_b0 > max_act) l0_b0 = max_act;
     if (l0_b1 < 0.0f) l0_b1 = 0.0f; else if (l0_b1 > max_act) l0_b1 = max_act;
-    l0_out[r + i] = l0_w0 * l0_w1;
-    l0_out[r + $H + i] = l0_b0 * l0_b1;
+    float o0 = l0_w0 * l0_w1, o1 = l0_b0 * l0_b1;
+    if (act_q) {   // fake_quantize_ft_act * correction, same roundings as fused_weight_quant.act_quant
+        o0 = __fmul_rn(__fmul_rn(floorf(__fadd_rn(__fmul_rn(o0, act_s), act_eps)), act_inv), act_c);
+        o1 = __fmul_rn(__fmul_rn(floorf(__fadd_rn(__fmul_rn(o1, act_s), act_eps)), act_inv), act_c);
+    }
+    l0_out[r + i] = o0;
+    l0_out[r + $H + i] = o1;
     if (clamped_out == nullptr) return;
     const size_t c = (size_t)b * 4 * $H;
     clamped_out[c + 0 * $H + i] = l0_w0;
@@ -125,8 +131,12 @@ def _launch(kernel, batch_size: int, l1_size: int, args):
     kernel(grid=((n + 255) // 256,), block=(256,), args=args)
 
 
+ACT_FUSED = True   # the epilogue applies act_quant (FusedDoubleFtFunction checks this)
+
+
 @torch.compiler.disable(recursive=True)
-def forward(us, them, white_indices, black_indices, weight, bias, max_ft_activation, l1_size, keep_acc=False):
+def forward(us, them, white_indices, black_indices, weight, bias, max_ft_activation, l1_size, keep_acc=False,
+            act_quant=None):
     """(l0_, clamped_out) like the fused forward kernel, or None when the tiled forward does not apply.
     With ``keep_acc`` (only when the tiled backward will run) it returns (l0_, (acc_w, acc_b)) instead:
     the backward recomputes the clamped values from the raw accumulators, which saves writing
@@ -145,7 +155,10 @@ def forward(us, them, white_indices, black_indices, weight, bias, max_ft_activat
     with _tb._cupy_stream(us.device):
         _launch(_kernel("tiled_ft_epilogue", _EPILOGUE_SRC, l1_size), batch_size, l1_size, (
             us.data_ptr(), them.data_ptr(), acc_w.data_ptr(), acc_b.data_ptr(), np.float32(max_ft_activation),
-            l0_.data_ptr(), 0 if keep_acc else clamped_out.data_ptr(), np.int32(batch_size)))
+            l0_.data_ptr(), 0 if keep_acc else clamped_out.data_ptr(), np.int32(batch_size),
+            *((np.int32(1), np.float32(act_quant[0]), np.float32(act_quant[1]), np.float32(1.0) / np.float32(act_quant[0]),
+               np.float32(act_quant[2])) if act_quant is not None else
+              (np.int32(0), np.float32(0), np.float32(0), np.float32(0), np.float32(0)))))
     return (l0_, (acc_w, acc_b)) if keep_acc else (l0_, clamped_out)
 
 

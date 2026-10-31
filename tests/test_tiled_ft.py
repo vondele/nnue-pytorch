@@ -149,3 +149,29 @@ def test_block_sort_matches_global_sort():
     p2 = TB.prepare(w, b, sort="global")
     assert p1.max_tile > TB.SORT_CAP_MAX and p1.sub_sorted is not None
     assert torch.equal(p1.e_key, p2.e_key) and torch.equal(p1.tile_start, p2.tile_start)
+
+
+@pytest.mark.parametrize("corr", [1.0, 0.75])
+def test_fused_act_quant_bit_identical(corr):
+    """act_quant fused into the tiled epilogue == FT output followed by fake_quantize_act_and_scale."""
+    from model.modules.feature_transformer import fused_weight_quant as FWQ
+    dev = torch.device("cuda")
+    gen = torch.Generator(device=dev).manual_seed(3)
+    B, maxa, num_inputs, l1 = 2048, 64, 3000, 512
+    w = _indices(B, maxa, num_inputs, gen, dev)
+    b = _indices(B, maxa, num_inputs, gen, dev)
+    W = torch.randn(num_inputs, l1 + 8, generator=gen, device=dev) * 0.05
+    bias = torch.rand(l1 + 8, generator=gen, device=dev) * 0.5
+    us = (torch.rand(B, 1, generator=gen, device=dev) < 0.5).float()
+    them = 1.0 - us
+    aq = (128.0, 1e-5, corr)
+    outs = []
+    for fused in (False, True):
+        bp = TB.register_prep(w, b)
+        TF.register_prep(w, b, order_perm=bp.order, from_backward=bp)
+        if fused:
+            out = FF.FusedDoubleFtFunction.apply(us, them, w, b, W, bias, MAX_ACT, l1, aq)
+        else:
+            out = FWQ.fake_quantize_act_and_scale(FF.FusedDoubleFtFunction.apply(us, them, w, b, W, bias, MAX_ACT, l1), *aq)
+        outs.append(out)
+    assert torch.equal(outs[0], outs[1])

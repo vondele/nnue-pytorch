@@ -209,13 +209,11 @@ extern "C" __global__ void tile_sort(const int32_t* __restrict__ tile_start, uin
     __syncthreads();
     for (int k = 2; k <= N2; k <<= 1) {
         for (int j = k >> 1; j > 0; j >>= 1) {
-            for (int i = threadIdx.x; i < N2; i += blockDim.x) {
-                const int ixj = i ^ j;
-                if (ixj > i) {
-                    const uint32_t a = sh[i], b = sh[ixj];
-                    const bool up = (i & k) == 0;
-                    if ((a > b) == up) { sh[i] = b; sh[ixj] = a; }
-                }
+            for (int q = threadIdx.x; q < (N2 >> 1); q += blockDim.x) {   // one compare per pair (i, i + j)
+                const int i = ((q & ~(j - 1)) << 1) | (q & (j - 1)), ixj = i + j;
+                const uint32_t a = sh[i], b = sh[ixj];
+                const bool up = (i & k) == 0;
+                if ((a > b) == up) { sh[i] = b; sh[ixj] = a; }
             }
             __syncthreads();
         }
@@ -504,7 +502,7 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = D
         # index differs). Same keys as the global sort; the sorted sub-tiles serve the pull forward.
         merged = torch.empty_like(keys)
         with _cupy_stream(dev):
-            _tile_sort_kernel(cap_sub)(grid=(n_lists // SUB + (n_lists % SUB > 0),), block=(256,), shared_mem=cap_sub * 4, #BS
+            _tile_sort_kernel(cap_sub)(grid=(n_lists // SUB + (n_lists % SUB > 0),), block=(512,), shared_mem=cap_sub * 4, #BS
                                        args=(sub_start.data_ptr(), keys.data_ptr()))
         _mark(timers, "subsort", dev)
         with _cupy_stream(dev):

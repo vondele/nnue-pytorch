@@ -24,9 +24,14 @@ Positions in a batch share most of their active feature rows. The 2B perspective
   summed in registers and written with ONE atomicAdd per (row, column) per tile, instead of one per
   (position, row, column). The bias gradient comes from the tile column sums. The PSQT columns use
   plain atomics, skipping zero gradients.
-- **Forward** (tiles of 16 lists, derived from the backward's tiles by a stable partition): one
-  block per (tile, 512-column slice) keeps the 16 accumulator rows in shared memory and reads every
-  distinct weight row of the tile once. A warp-per-list kernel handles the PSQT columns.
+- **Forward** (default: the pull gather, `tiled_ft_pull.py`, tiles of 64 lists): one block per
+  (tile, 128-column slice) stages the tile's distinct rows (ascending) chunk by chunk (32 rows,
+  `cp.async`, double-buffered) into shared memory; each of its 16 warps keeps the accumulators of 4
+  lists in registers (lane = 4 columns) and adds, per chunk, the staged rows each list uses. Every
+  output is bias + rows in ascending row order, exactly as in the 16-list gather below, so the two are
+  bit-identical. `NNUE_TILED_PULL=0` selects the 16-list gather (tiles of 16 lists, accumulators in
+  shared memory; it was bound by the shared-memory read + write per (entry, column)). A warp-per-list
+  kernel handles the PSQT columns and stops at the end of each (left-packed) list.
 
 ## Index preparation
 
@@ -37,9 +42,18 @@ Without a registered preparation, the forward uses the plain kernel (`tiled_ft_f
 and the backward prepares itself (`tiled_ft_backward.STATS["fallback"]`).
 `NNUE_TILED_PREFETCH=0` disables the prefetch-side preparation.
 
+The 256-list tiles (~23k entries) are too large for one shared-memory sort; their 64-list sub-tiles
+are sorted in shared memory and the four sorted runs of a tile are merged by rank (the keys are unique
+across runs), which gives the same keys as a global sort. The pull forward uses the sorted sub-tiles
+directly. The pull preparation (`pull_lists`: per (32-row chunk, list) counts and the chunk-major
+entry stream) adds no host sync. The prefetch stream runs at high priority so the preparation keeps
+ahead of the training step.
+
 Tuning variables: `NNUE_TILED_T` / `NNUE_TILED_SLICE` / `NNUE_TILED_WARPS` / `NNUE_TILED_ORDER` /
 `NNUE_TILED_SORT` / `NNUE_TILED_GRID` (backward); `NNUE_TILED_FWD_T` / `NNUE_TILED_FWD_SLICE` /
-`NNUE_TILED_FWD_VEC` / `NNUE_TILED_FWD_P` (forward); `NNUE_TILED_HK_OFF` is the first king-bucketed row
+`NNUE_TILED_FWD_VEC` / `NNUE_TILED_FWD_P` (16-list forward); `NNUE_PULL_TL` / `NNUE_PULL_R` /
+`NNUE_PULL_LPW` / `NNUE_PULL_VEC` / `NNUE_PULL_NS` (pull forward: lists per tile, rows per chunk,
+lists per warp, columns per lane, pipeline stages); `NNUE_TILED_HK_OFF` is the first king-bucketed row
 of the composed feature set (default 64368 = Full_Threats + PP_3Wide, i.e. the start of K32H3), used
 only by the ordering heuristic.
 
@@ -82,9 +96,24 @@ restores the reference chains). Both are bit-identical in forward and backward t
   gradient and sums the virtual slice over the buckets. For the default model this is a ~570 MB tensor
   that the reference chain passed over about eight times per step.
 - `fake_quantize_ft_act(l0_) * l0_correction_factor` is one kernel (fp32 roundings as PyTorch's scalar
-  ops, no FMA contraction); its gradient is `grad * c`.
+  ops, no FMA contraction); its gradient is `grad * c`. When the tiled forward runs, the same
+  roundings are applied in the FT epilogue (`act_quant` argument of `double_feature_transform`), so
+  the unquantized `l0_` is never written.
 
 RTX 3090 at 1500 MHz, default model, B = 65536, same plain loop as above: 17.5 -> 23.2 it/s (1.33x).
 Per step (42.8 ms of GPU time): tiled FT forward 10.6 ms, tiled FT backward 9.7 ms, fused Adam 5.0 ms,
 index preparation 4.8 ms (on the loader's stream, overlapped), layer stacks ~7 ms, weight merge 1.7 ms.
 The loader alone delivers ~34 batches/s with 16 workers, so training stays GPU bound.
+
+## tiled-ft-4
+
+RTX 3090 at 1500 MHz, real `train.py` + torch.compile, B = 65536, 16 loader workers, 3 epochs x 400
+steps, last epoch's it/s, arms interleaved: tiled-ft-3 24.4-24.9 it/s; this version: see the commit
+messages. Per step (nsys, after the pull forward + sort changes): main stream 98.9% busy; tiled scatter
+7.6 ms, pull gather 7.3 ms (the 16-list gather took 9.3 ms in isolation on a real batch, the pull
+gather 7.0 ms), fused optimizer 6.1 ms.
+
+Exactness: the forward (FT output, PSQT columns, fused activation quantization, and the whole model
+output on real batches) is bit-identical to tiled-ft-3. The backward's per-tile sums are unchanged;
+weight gradients differ from tiled-ft-3 by no more than tiled-ft-3 differs from itself between runs
+(atomic order, ~9e-7 relative).
