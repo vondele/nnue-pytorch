@@ -128,7 +128,6 @@ def _probe_context():
             f"({torch.cuda.get_device_name(torch.cuda.current_device())})\n"
             f"stream : torch handle {st.cuda_stream:#x} (device {st.device})\n"
             f"stream : cupy  handle {cst.ptr:#x}\n"
-            f"ctxdev : cupy current device {cp.cuda.runtime.currentDevice()}\n"
             f"driver : {cp.cuda.runtime.driverGetVersion()} "
             f"runtime {cp.cuda.runtime.runtimeGetVersion()}\n"
         )
@@ -152,12 +151,17 @@ class _ProbedKernel:
         try:
             return self._inner(*a, **kw)
         except Exception as e:
+            optin = getattr(self._inner, "max_dynamic_shared_size_bytes", "?")
+            regs = getattr(self._inner, "num_regs", "?")
             _probe_write(
                 f"===== launch FAILED =====\n"
                 f"kernel : {self._key}\n"
                 f"grid   : {grid}\n"
                 f"block  : {block}\n"
                 f"shared : {smem}\n"
+                f"optin  : {optin}\n"
+                f"regs   : {regs}\n"
+                f"args   : {list(a)}\n"
                 f"{_probe_context()}"
                 f"error  : {type(e).__name__}: {e}"
             )
