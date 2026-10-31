@@ -565,6 +565,7 @@ class PullPrep:
                 t.record_stream(stream)
 
 
+@torch.compiler.disable
 def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, bp) -> PullPrep | None:
     """From the backward's preparation ``bp`` (tiles of TL lists, row-sorted keys). None when a tile
     has more than R * MAX_CHUNKS distinct rows (the caller then uses the 16-list gather)."""
@@ -646,6 +647,7 @@ def epi_applicable(l1_size: int) -> bool:
     return EPI_FUSED and VEC == 4 and l1_size % 2 == 0 and (l1_size // 2) % (SLICE // 2) == 0
 
 
+@torch.compiler.disable
 def gather(weight, bias, l1_size, prep: PullPrep, out_w, out_b, epi=None):
     """Columns 0..l1_size of the two outputs (B, OUT) in original batch order. ``epi`` = (us, them, l0_out,
     mark, max_act, act_q, act_s, act_eps, act_inv, act_c): also write l0_ (fused epilogue, see the kernel)."""

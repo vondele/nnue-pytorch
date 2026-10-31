@@ -119,6 +119,7 @@ def usable(segs) -> bool:
 
 class _MergeFakeQuant(torch.autograd.Function):
     @staticmethod
+    @torch.compiler.disable
     def forward(ctx, scale, layout, *params):
         s = np.float32(scale)
         inv = np.float32(1.0) / s
@@ -200,6 +201,7 @@ _bsum_kernel = None
 BUCKET_SUM = os.environ.get("NNUE_BUCKET_SUM_KERNEL", "1") != "0"
 
 
+@torch.compiler.disable
 def _bucket_sum(g, flags, nb, vs):
     """g.view(nb, *vs).sum(0) for a contiguous fp32 g whose unflagged rows are +0 (bit-identical)."""
     global _bsum_kernel
@@ -252,6 +254,7 @@ _act_kernel = None
 
 class _ActFakeQuant(torch.autograd.Function):
     @staticmethod
+    @torch.compiler.disable
     def forward(ctx, x, scale, eps, corr):
         global _act_kernel
         if _act_kernel is None:

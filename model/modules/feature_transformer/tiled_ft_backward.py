@@ -615,6 +615,7 @@ def list_counts(white: torch.Tensor, black: torch.Tensor) -> torch.Tensor:
     return torch.cat([(white >= 0).sum(1, dtype=torch.int32), (black >= 0).sum(1, dtype=torch.int32)])
 
 
+@torch.compiler.disable
 def list_order(white: torch.Tensor, black: torch.Tensor, order: str = DEFAULT_ORDER, hk_off: int = DEFAULT_HK_OFF, seed: int = 0,
                with_counts: bool = False):
     """Permutation of the perspective lists (white 0..B-1, black B..2B-1; int32) used to form the tiles.
@@ -647,6 +648,7 @@ def _sort_cap(T: int) -> int:
     return cap
 
 
+@torch.compiler.disable
 def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = DEFAULT_T,
             order: str = DEFAULT_ORDER, hk_off: int = DEFAULT_HK_OFF, sort: str = DEFAULT_SORT,
             grid: str = DEFAULT_GRID, timers: dict | None = None,
@@ -785,6 +787,7 @@ def applicable(l1_size: int, slice_cols: int = DEFAULT_SLICE) -> bool:
     return _HAS_CUPY and l1_size % slice_cols == 0 and l1_size >= slice_cols
 
 
+@torch.compiler.disable
 def tiled_backward(white_indices, black_indices, grad_w, grad_b, num_inputs, l1_size,
                    prep: TiledPrep | None = None, slice_cols: int = DEFAULT_SLICE,
                    grid: str = DEFAULT_GRID, nwarps: int = DEFAULT_WARPS, timers: dict | None = None, pro=None):

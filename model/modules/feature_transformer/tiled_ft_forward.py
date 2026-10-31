@@ -328,6 +328,7 @@ class ForwardPrep:
             t.record_stream(stream)
 
 
+@torch.compiler.disable
 def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = DEFAULT_T,
             order_perm: torch.Tensor | None = None, timers: dict | None = None,
             from_backward: "_tb.TiledPrep | None" = None, **order_kw) -> ForwardPrep:
@@ -411,6 +412,7 @@ def lookup_prep(white_indices: torch.Tensor) -> ForwardPrep | None:
 
 # ----------------------------------------------------------------------------- forward
 
+@torch.compiler.disable
 def tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep: ForwardPrep,
                   slice_cols: int = DEFAULT_SLICE, vec: int = DEFAULT_VEC, P: int = DEFAULT_P,
                   timers: dict | None = None, epi=None):
@@ -448,6 +450,7 @@ def tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep: For
     return out_w, out_b
 
 
+@torch.compiler.disable
 def _pull_forward(white_indices, black_indices, weight, bias, l1_size, prep, timers=None, epi=None):
     dev = weight.device
     B, maxa = white_indices.shape

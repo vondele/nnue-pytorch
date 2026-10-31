@@ -21,6 +21,7 @@ _DENSE_FORWARD = os.environ.get("NNUE_L1_DENSE_FORWARD", "1") != "0"
 _sparse_forward_kernels = {}
 
 
+@torch.compiler.disable
 def _sparse_forward(x, weight, bias, indices, count):
     """Compact NNZ in shared memory and coalesce loads over adjacent outputs.
 
