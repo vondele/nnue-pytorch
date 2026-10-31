@@ -259,7 +259,7 @@ def _tile_sort_kernel(cap: int):
 _SCATTER_SRC = _HDR + r"""
 #define GV @GV@
 // One block per (tile, column slice). NWARPS warps; lane owns columns col0 + lane + 32*c, c < CPL.
-extern "C" __global__ void tiled_scatter(
+extern "C" __global__ void __launch_bounds__(@NWARPS@ * 32) tiled_scatter(
     const float* __restrict__ Gw, const float* __restrict__ Gb, const int32_t* __restrict__ order, const int32_t* __restrict__ tile_map,
     const int32_t* __restrict__ tile_start, const uint32_t* __restrict__ e_key,
     float* __restrict__ grad_weight, float* __restrict__ grad_bias, const int32_t n_lists, const int32_t batch_size,
@@ -271,16 +271,29 @@ extern "C" __global__ void tiled_scatter(
     const int32_t slice = @SLICE_FASTEST@ ? blockIdx.x : blockIdx.y;
     const int32_t col0 = slice * SLICE;
 
-    // 1. the tile's gradient rows for this column slice
-    for (int idx = threadIdx.x; idx < T * SLICE; idx += blockDim.x) {
-        const int l = idx / SLICE, c = idx - l * SLICE;
-        const int32_t li = tile * T + l;
-        float v = 0.0f;
-        if (li < n_lists) {
-            const int32_t lid = order[li];
-            v = lid < batch_size ? Gw[(int64_t)lid * OUT + col0 + c] : Gb[(int64_t)(lid - batch_size) * OUT + col0 + c];
+    // 1. the tile's gradient rows for this column slice; every thread issues all its loads (PF list ids,
+    // then PF values) before its shared-memory stores
+    {
+        const int NT = @NWARPS@ * 32, PF = (T * SLICE + NT - 1) / NT;
+        int32_t lid[PF];
+#pragma unroll
+        for (int k = 0; k < PF; ++k) {
+            const int idx = threadIdx.x + k * NT;
+            const int32_t li = tile * T + idx / SLICE;
+            lid[k] = (idx < T * SLICE && li < n_lists) ? __ldg(&order[li]) : -1;
         }
-        Gsh[l * SLICE + (c & 31) * CPL + (c >> 5)] = v;   // column c of the slice at lane (c % 32), slot c / 32
+        float v[PF];
+#pragma unroll
+        for (int k = 0; k < PF; ++k) {
+            const int c = (threadIdx.x + k * NT) % SLICE;
+            v[k] = lid[k] < 0 ? 0.0f : lid[k] < batch_size ? __ldg(&Gw[(int64_t)lid[k] * OUT + col0 + c])
+                                                           : __ldg(&Gb[(int64_t)(lid[k] - batch_size) * OUT + col0 + c]);
+        }
+#pragma unroll
+        for (int k = 0; k < PF; ++k) {
+            const int idx = threadIdx.x + k * NT, l = idx / SLICE, c = idx - l * SLICE;
+            if (idx < T * SLICE) Gsh[l * SLICE + (c & 31) * CPL + (c >> 5)] = v[k];   // column c at lane (c % 32), slot c / 32
+        }
     }
     __syncthreads();
 
