@@ -124,6 +124,8 @@ def _probe_context():
         st = torch.cuda.current_stream()
         cst = cp.cuda.get_current_stream()
         return (
+            f"cupy   : {cp.__version__}\n"
+            f"torch  : {torch.__version__} (cuda {torch.version.cuda})\n"
             f"device : torch current {torch.cuda.current_device()} "
             f"({torch.cuda.get_device_name(torch.cuda.current_device())})\n"
             f"stream : torch handle {st.cuda_stream:#x} (device {st.device})\n"
