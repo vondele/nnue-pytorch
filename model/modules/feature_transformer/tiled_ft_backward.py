@@ -443,6 +443,7 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = D
     tile_start = torch.cat([offsets[0:n_lists:T], offsets[n_lists:]]).contiguous()
     tile_n = tile_start[1:] - tile_start[:-1]
     E, max_tile = (int(x) for x in torch.stack([offsets[-1], tile_n.max()]).tolist())  # one host sync per batch
+    n_entries = E
     E, max_tile = max(E, 1), max(max_tile, 1)
     keys = torch.empty(E, dtype=torch.int32, device=dev)
     with _cupy_stream(dev):
@@ -458,7 +459,7 @@ def prepare(white_indices: torch.Tensor, black_indices: torch.Tensor, T: int = D
     else:
         if sort == "block" and cap <= SORT_CAP_MAX:
             STATS["global_sort_fallback"] += 1  # a tile exceeded the shared-memory capacity
-        tile_of = torch.repeat_interleave(torch.arange(n_tiles, device=dev, dtype=torch.int64), tile_n.long())
+        tile_of = torch.repeat_interleave(torch.arange(n_tiles, device=dev, dtype=torch.int64), tile_n.long(), output_size=n_entries)  # size known: no host sync
         full = (tile_of << 32) | (keys.to(torch.int64) & 0xFFFFFFFF)
         keys = (torch.sort(full)[0] & 0xFFFFFFFF).to(torch.int32)
     _mark(timers, "sort", dev)

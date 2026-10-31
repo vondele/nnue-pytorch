@@ -117,3 +117,23 @@ def test_tiled_matches_reference(B, l1, prefetch):
     print(f"B={B} l1={l1} prefetch={prefetch}: out tiled {rel(t_out, ref_l0):.1e} upstream {rel(u_out, ref_l0):.1e}; "
           f"gW tiled {rel(t_gW, ref_gW):.1e} upstream {rel(u_gW, ref_gW):.1e}; "
           f"gb tiled {rel(t_gb, ref_gb):.1e} upstream {rel(u_gb, ref_gb):.1e}")
+
+
+@pytest.mark.parametrize("B", [1000, 4096])
+def test_pull_forward_bit_identical(B):
+    """The pull gather sums bias + rows in ascending row order, exactly like the 16-list gather."""
+    from model.modules.feature_transformer import tiled_ft_pull as TP
+    dev = torch.device("cuda")
+    gen = torch.Generator(device=dev).manual_seed(B)
+    maxa, num_inputs, l1 = 64, 3000, 512
+    w = _indices(B, maxa, num_inputs, gen, dev)
+    b = _indices(B, maxa, num_inputs, gen, dev)
+    W = torch.randn(num_inputs, l1 + 8, generator=gen, device=dev)
+    bias = torch.randn(l1 + 8, generator=gen, device=dev)
+    bp = TB.prepare(w, b)
+    pp = TP.prepare(w, b, bp)
+    assert pp is not None
+    fp = TF.prepare(w, b, T=16, order_perm=bp.order, from_backward=bp)
+    ref = TF.tiled_forward(w, b, W, bias, l1, fp)
+    out = TF.tiled_forward(w, b, W, bias, l1, pp)
+    assert torch.equal(ref[0], out[0]) and torch.equal(ref[1], out[1])

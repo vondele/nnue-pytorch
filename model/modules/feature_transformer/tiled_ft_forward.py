@@ -43,6 +43,7 @@ import numpy as np
 import torch
 
 from . import tiled_ft_backward as _tb
+from . import tiled_ft_pull as _tp
 
 try:
     import cupy as cp
@@ -58,6 +59,7 @@ DEFAULT_SLICE = int(os.environ.get("NNUE_TILED_FWD_SLICE", "512"))
 DEFAULT_VEC = int(os.environ.get("NNUE_TILED_FWD_VEC", "4"))
 DEFAULT_P = int(os.environ.get("NNUE_TILED_FWD_P", "8"))
 PREFETCH_PREP = os.environ.get("NNUE_TILED_PREFETCH", "1") == "1"
+PULL_ENABLED = os.environ.get("NNUE_TILED_PULL", "1") != "0"   # pull gather (tiled_ft_pull.py); 0: the 16-list gather
 
 LOCAL_BITS = _tb.LOCAL_BITS
 MAX_SHARED_BYTES = _tb.MAX_SHARED_BYTES
@@ -250,8 +252,10 @@ extern "C" __global__ void psqt_gather(
     float s[NP];
 #pragma unroll
     for (int p = 0; p < NP; ++p) s[p] = 0.0f;
-    for (int k = lane; k < MAXA; k += 32) {
-        const int32_t r = row[k];
+    for (int k0 = 0; k0 < MAXA; k0 += 32) {               // warp-uniform trip count
+        const int32_t k = k0 + lane;
+        const int32_t r = k < MAXA ? row[k] : -1;
+        if (__all_sync(0xffffffffu, r < 0)) break;           // lists are left-packed: the rest is padding
         if (r >= 0) {
 #pragma unroll
             for (int p = 0; p < NP; ++p) s[p] += __ldg(&weight[(int64_t)r * OUT + L1 + p]);
@@ -377,7 +381,11 @@ def register_prep(white_indices: torch.Tensor, black_indices: torch.Tensor, orde
     ``order_perm`` is the backward's list order when the tiled backward is on (else it is computed)."""
     if not (TILED_FORWARD_ENABLED and PREFETCH_PREP and _HAS_CUPY and white_indices.is_cuda):
         return
-    prep = prepare(white_indices, black_indices, order_perm=order_perm, **kw)
+    prep = None
+    if PULL_ENABLED and kw.get("from_backward") is not None:
+        prep = _tp.prepare(white_indices, black_indices, kw["from_backward"])   # None: unsupported tile -> 16-list gather
+    if prep is None:
+        prep = prepare(white_indices, black_indices, order_perm=order_perm, **kw)
     with _prep_lock:
         _prep_cache[white_indices.data_ptr()] = (weakref.ref(white_indices), tuple(white_indices.shape), prep)
         _prep_cache.move_to_end(white_indices.data_ptr())
@@ -414,6 +422,8 @@ def tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep: For
     n_lists = 2 * B
     if prep.n_lists != n_lists:
         raise RuntimeError("tiled forward: preparation does not match the batch")
+    if isinstance(prep, _tp.PullPrep):
+        return _pull_forward(white_indices, black_indices, weight, bias, l1_size, prep, timers)
     shm = shared_bytes(prep.T, slice_cols, prep.max_tile)
     if shm > MAX_SHARED_BYTES:
         raise ValueError(f"tiled forward: T={prep.T} x slice={slice_cols} with {prep.max_tile} entries per tile needs {shm} B of shared memory")
@@ -429,6 +439,28 @@ def tiled_forward(white_indices, black_indices, weight, bias, l1_size, prep: For
                 np.int32(n_lists), np.int32(B), np.int32(prep.max_tile)))
         _tb._mark(timers, "gather", dev)
         if OUT > l1_size:
+            _psqt_kernel(maxa, l1_size, OUT)(grid=((n_lists * 32 + 255) // 256,), block=(256,), args=(
+                white_indices.data_ptr(), black_indices.data_ptr(), weight.data_ptr(), bias.data_ptr(),
+                out_w.data_ptr(), out_b.data_ptr(), np.int32(n_lists), np.int32(B)))
+        _tb._mark(timers, "psqt", dev)
+    return out_w, out_b
+
+
+def _pull_forward(white_indices, black_indices, weight, bias, l1_size, prep, timers=None):
+    dev = weight.device
+    B, maxa = white_indices.shape
+    OUT = bias.shape[0]
+    n_lists = 2 * B
+    if prep.n_lists != n_lists or l1_size % _tp.SLICE:
+        raise RuntimeError("tiled forward: pull preparation does not match the batch / layer width")
+    _tb._mark(timers, "start", dev)
+    out_w = torch.empty(B, OUT, dtype=torch.float32, device=dev)
+    out_b = torch.empty(B, OUT, dtype=torch.float32, device=dev)
+    white_indices = white_indices.contiguous(); black_indices = black_indices.contiguous()
+    _tp.gather(weight, bias, l1_size, prep, out_w, out_b)
+    _tb._mark(timers, "gather", dev)
+    if OUT > l1_size:
+        with _tb._cupy_stream(dev):
             _psqt_kernel(maxa, l1_size, OUT)(grid=((n_lists * 32 + 255) // 256,), block=(256,), args=(
                 white_indices.data_ptr(), black_indices.data_ptr(), weight.data_ptr(), bias.data_ptr(),
                 out_w.data_ptr(), out_b.data_ptr(), np.int32(n_lists), np.int32(B)))

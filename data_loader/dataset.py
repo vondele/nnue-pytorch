@@ -405,7 +405,7 @@ class FixedNumBatchesDataset(Dataset):
             prefetch_stream = None
             if prefetch_device is not None:
                 torch.cuda.set_device(prefetch_device)
-                prefetch_stream = torch.cuda.Stream(device=prefetch_device)
+                prefetch_stream = torch.cuda.Stream(device=prefetch_device, priority=-1)
 
             while not stop_event.is_set():
                 try:
