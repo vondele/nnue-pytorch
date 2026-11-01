@@ -622,14 +622,14 @@ static double builder_thread_ratio(double fallback) {
     return v ? std::atof(v) : fallback;
 }
 
-int FeaturedBatchStream::calculate_num_reader_threads(int concurrency) {
-    if (builder_thread_ratio(worker_thread_ratio) >= 1)
+int FeaturedBatchStream::calculate_num_reader_threads(int concurrency, int batch_size) {
+    if (builder_thread_ratio(worker_thread_ratio(batch_size)) >= 1)
         return 1;
-    return std::max(1, concurrency - calculate_num_worker_threads(concurrency));
+    return std::max(1, concurrency - calculate_num_worker_threads(concurrency, batch_size));
 }
 
-int FeaturedBatchStream::calculate_num_worker_threads(int concurrency) {
-    const double ratio = builder_thread_ratio(worker_thread_ratio);
+int FeaturedBatchStream::calculate_num_worker_threads(int concurrency, int batch_size) {
+    const double ratio = builder_thread_ratio(worker_thread_ratio(batch_size));
     if (ratio <= 0)
         return 1;
     return std::max(1, static_cast<int>(std::floor(concurrency * ratio)));
@@ -646,7 +646,7 @@ FeaturedBatchStream::FeaturedBatchStream(
   int                                           world_size,
   nnue::UniquePositionCounter*                  counter,
   DataloaderIOConfig                            io_config) :
-    BaseType(calculate_num_reader_threads(concurrency),
+    BaseType(calculate_num_reader_threads(concurrency, batch_size),
              filenames,
              cyclic,
              skipPredicate,
@@ -654,12 +654,12 @@ FeaturedBatchStream::FeaturedBatchStream(
              rank,
              world_size,
              io_config,
-             calculate_num_worker_threads(concurrency)),
+             calculate_num_worker_threads(concurrency, batch_size)),
     m_feature_set(std::move(feature_set)),
     m_batch_size(batch_size),
     m_concurrency(concurrency),
-    m_num_workers(calculate_num_worker_threads(concurrency)),
-    m_batch_queue_capacity(calculate_num_worker_threads(concurrency) + 4) {
+    m_num_workers(calculate_num_worker_threads(concurrency, batch_size)),
+    m_batch_queue_capacity(calculate_num_worker_threads(concurrency, batch_size) + 4) {
 
     // At most one fetched batch, the finished deque, and one batch per builder
     // normally exist at a time. Recycle that working set without growing a
@@ -700,7 +700,7 @@ FeaturedBatchStream::FeaturedBatchStream(
         m_batches_any.notify_one();
     };
 
-    const int num_worker_threads = calculate_num_worker_threads(concurrency);
+    const int num_worker_threads = calculate_num_worker_threads(concurrency, batch_size);
     for (int i = 0; i < num_worker_threads; ++i)
     {
         m_workers.emplace_back(worker);
