@@ -23,6 +23,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import NNUE, NNUEConfig
+from model.modules.router import FC0_ROUTER_TABLE_SIZE, ROUTER_TABLE_SIZE
 from trainer.engine import SimpleTrainer, init_distributed
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -88,8 +89,10 @@ def _synthetic_batches(seed, num_batches, batch_size, num_inputs, max_active):
             indices.append(idx)
         outcome = torch.randint(0, 3, (batch_size, 1), generator=gen).float() / 2
         score = torch.randn(batch_size, 1, generator=gen) * 300
-        c_us = torch.randint(0, 849420, (batch_size,), generator=gen)
-        c_them = torch.randint(0, 849420, (batch_size,), generator=gen)
+        # The two router banks need asymmetric index ranges: the fc0 bank is
+        # pair-composed, the tail bank king-composed.
+        c_us = torch.randint(0, FC0_ROUTER_TABLE_SIZE, (batch_size,), generator=gen)
+        c_them = torch.randint(0, ROUTER_TABLE_SIZE, (batch_size,), generator=gen)
         batches.append((us, 1.0 - us, *indices, outcome, score, c_us, c_them))
     return batches
 
